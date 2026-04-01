@@ -30,6 +30,16 @@ void expect_between(double value, double lower, double upper, const std::string&
   expect(value >= lower - 1.0e-9 && value <= upper + 1.0e-9, message);
 }
 
+void expect_quat_equivalent(
+  const rex::math::Quat& actual,
+  const rex::math::Quat& expected,
+  double tolerance,
+  const std::string& message) {
+  const double alignment =
+    std::abs((actual.w * expected.w) + (actual.x * expected.x) + (actual.y * expected.y) + (actual.z * expected.z));
+  expect(nearly_equal(alignment, 1.0, tolerance), message);
+}
+
 auto make_sphere_body(
   std::uint32_t index,
   const rex::math::Vec3& translation,
@@ -47,10 +57,11 @@ auto make_box_body(
   std::uint32_t index,
   const rex::math::Vec3& translation,
   const rex::math::Vec3& half_extents,
-  double inverse_mass = 1.0) -> rex::dynamics::BodyState {
+  double inverse_mass = 1.0,
+  const rex::math::Quat& rotation = {}) -> rex::dynamics::BodyState {
   return {
     .id = rex::platform::EntityId{.index = index, .generation = 1},
-    .pose = rex::math::Transform{.translation = translation},
+    .pose = rex::math::Transform{.rotation = rotation, .translation = translation},
     .inverse_mass = inverse_mass,
     .shape = rex::geometry::Shape{.data = rex::geometry::Box{.half_extents = half_extents}},
   };
@@ -62,8 +73,9 @@ void test_capture_frame_extracts_shapes_and_contacts() {
   rex::sim::Engine engine{config};
 
   rex::dynamics::WorldState world{};
+  const rex::math::Quat box_rotation = rex::math::quat_from_axis_angle({0.0, 1.0, 0.0}, 0.35);
   const std::size_t box_index =
-    world.bodies.add_body(make_box_body(9, {0.0, 0.0, 0.0}, {0.5, 0.5, 0.5}, 0.0));
+    world.bodies.add_body(make_box_body(9, {0.0, 0.0, 0.0}, {0.5, 0.5, 0.5}, 0.0, box_rotation));
   const std::size_t sphere_index =
     world.bodies.add_body(make_sphere_body(4, {1.2, 0.0, 0.0}, 0.8));
 
@@ -78,6 +90,7 @@ void test_capture_frame_extracts_shapes_and_contacts() {
   expect(frame.contacts.size() == 1, "frame should capture one contact");
   expect(frame.bodies[0].shape == rex::viewer::SnapshotShapeKind::kBox, "first body should be a box");
   expect(frame.bodies[1].shape == rex::viewer::SnapshotShapeKind::kSphere, "second body should be a sphere");
+  expect_quat_equivalent(frame.bodies[0].rotation, box_rotation, 1.0e-9, "capture should preserve box rotation");
   expect(frame.trace.manifold_count == 1, "frame trace should keep solver metadata");
 }
 
@@ -89,11 +102,12 @@ void test_replay_round_trip() {
   frame.trace.body_count = 1;
   frame.trace.solver.contact_count = 1;
   frame.bodies.push_back({
-    .id = rex::platform::EntityId{.index = 4, .generation = 2},
-    .shape = rex::viewer::SnapshotShapeKind::kSphere,
-    .translation = {1.0, 0.0, 2.0},
-    .dimensions = {0.6, 0.0, 0.0},
-  });
+      .id = rex::platform::EntityId{.index = 4, .generation = 2},
+      .shape = rex::viewer::SnapshotShapeKind::kSphere,
+      .rotation = rex::math::quat_from_axis_angle({0.0, 1.0, 0.0}, 0.2),
+      .translation = {1.0, 0.0, 2.0},
+      .dimensions = {0.6, 0.0, 0.0},
+    });
   frame.contacts.push_back({
     .body_a = rex::platform::EntityId{.index = 4, .generation = 2},
     .body_b = rex::platform::EntityId{.index = 9, .generation = 1},
@@ -111,6 +125,11 @@ void test_replay_round_trip() {
   expect(loaded.frames()[0].bodies.size() == 1, "loaded replay should keep body records");
   expect(loaded.frames()[0].contacts.size() == 1, "loaded replay should keep contact records");
   expect(loaded.frames()[0].bodies[0].shape == rex::viewer::SnapshotShapeKind::kSphere, "shape kind should round-trip");
+  expect_quat_equivalent(
+    loaded.frames()[0].bodies[0].rotation,
+    frame.bodies[0].rotation,
+    1.0e-9,
+    "body rotation should round-trip through replay serialization");
   expect(nearly_equal(loaded.frames()[0].contacts[0].penetration, 0.25), "penetration should round-trip");
 }
 
@@ -123,6 +142,7 @@ void test_svg_render_includes_shapes_and_contacts() {
   frame.bodies.push_back({
     .id = rex::platform::EntityId{.index = 9, .generation = 1},
     .shape = rex::viewer::SnapshotShapeKind::kBox,
+    .rotation = rex::math::quat_from_axis_angle({0.0, 1.0, 0.0}, 0.5),
     .translation = {0.0, 0.0, 0.0},
     .dimensions = {0.5, 0.5, 0.5},
   });
@@ -142,7 +162,7 @@ void test_svg_render_includes_shapes_and_contacts() {
 
   const std::string svg = rex::viewer::render_frame_svg(frame);
   expect(svg.find("<svg") != std::string::npos, "svg output should contain root element");
-  expect(svg.find("<rect") != std::string::npos, "svg output should contain a box primitive");
+  expect(svg.find("<polygon") != std::string::npos, "svg output should contain a rotated box polygon");
   expect(svg.find("<circle") != std::string::npos, "svg output should contain circle primitives");
   expect(svg.find("frame=1") != std::string::npos, "svg output should include frame metadata");
 }
@@ -331,6 +351,30 @@ void test_viewer_selection_prefers_contacts_then_bodies() {
   expect(!state.selection.contact_index.has_value(), "clicking empty space should clear contact selection");
 }
 
+void test_rotated_box_projection_and_selection_use_quaternion_pose() {
+  rex::viewer::FrameSnapshot frame{};
+  frame.bodies.push_back({
+    .id = rex::platform::EntityId{.index = 31, .generation = 1},
+    .shape = rex::viewer::SnapshotShapeKind::kBox,
+    .rotation = rex::math::quat_from_axis_angle({0.0, 1.0, 0.0}, 0.6),
+    .translation = {0.4, 0.0, 0.2},
+    .dimensions = {0.6, 0.4, 0.3},
+  });
+
+  rex::viewer::ViewerState state{};
+  const rex::viewer::FrameViewport viewport{.width = 1000.0, .height = 800.0, .margin = 80.0};
+  rex::viewer::fit_camera_to_frame(state, frame, viewport);
+
+  const std::vector<rex::viewer::ScreenPoint> outline =
+    rex::viewer::project_box_outline(frame.bodies[0], state.camera, viewport);
+  expect(outline.size() >= 4, "rotated box projection should produce a polygon outline");
+
+  const rex::viewer::ScreenPoint center =
+    rex::viewer::project_point(state.camera, viewport, frame.bodies[0].translation);
+  rex::viewer::select_at_point(state, frame, viewport, center);
+  expect(state.selection.body_index == std::optional<std::size_t>{0}, "rotated box selection should use the projected polygon");
+}
+
 void test_demo_scene_runner_produces_monotonic_frames() {
   rex::viewer::DemoSceneRunner runner{};
   const rex::viewer::FrameSnapshot first = runner.step_frame();
@@ -355,6 +399,7 @@ int main() {
   test_viewer_camera_fit_keeps_geometry_inside_margin();
   test_viewer_timeline_mapping_and_scrubbing();
   test_viewer_selection_prefers_contacts_then_bodies();
+  test_rotated_box_projection_and_selection_use_quaternion_pose();
   test_demo_scene_runner_produces_monotonic_frames();
   std::cout << "all viewer tests passed\n";
   return 0;

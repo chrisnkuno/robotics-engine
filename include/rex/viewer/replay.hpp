@@ -20,6 +20,7 @@ enum class SnapshotShapeKind {
 struct SnapshotBody {
   rex::platform::EntityId id{};
   SnapshotShapeKind shape{SnapshotShapeKind::kSphere};
+  rex::math::Quat rotation{};
   rex::math::Vec3 translation{};
   rex::math::Vec3 dimensions{};
 };
@@ -62,4 +63,3 @@ class ReplayLog {
   double sim_time) -> FrameSnapshot;
 
 }  // namespace rex::viewer
-

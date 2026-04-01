@@ -9,6 +9,7 @@ project(
 option(REX_ENABLE_CUDA "Enable the experimental CUDA backend target." OFF)
 option(REX_ENABLE_PYTHON "Build Python bindings when pybind11 is available." OFF)
 option(REX_ENABLE_TESTS "Build smoke tests." ON)
+option(REX_ENABLE_TRACY "Enable Tracy profiling zones when Tracy headers are available." OFF)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -29,6 +30,10 @@ function(rex_configure_target target)
     target_compile_options(${target} PRIVATE /W4 /permissive-)
   else()
     target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
+  endif()
+
+  if(REX_ENABLE_TRACY)
+    target_compile_definitions(${target} PUBLIC REX_ENABLE_TRACY=1)
   endif()
 endfunction()
 
@@ -99,6 +104,10 @@ add_executable(rex_viewer_app apps/rex_viewer_main.cpp)
 rex_configure_target(rex_viewer_app)
 target_link_libraries(rex_viewer_app PRIVATE rex_engine)
 
+add_executable(rex_perf_app apps/rex_perf_main.cpp)
+rex_configure_target(rex_perf_app)
+target_link_libraries(rex_perf_app PRIVATE rex_engine)
+
 if(REX_ENABLE_CUDA)
   include(CheckLanguage)
   check_language(CUDA)
@@ -109,7 +118,7 @@ if(REX_ENABLE_CUDA)
     add_library(rex_gpu STATIC src/gpu/backend.cu)
     rex_configure_target(rex_gpu)
     target_link_libraries(rex_gpu PUBLIC rex_collision rex_dynamics)
-    target_compile_features(rex_gpu PUBLIC cuda_std_17)
+    target_compile_features(rex_gpu PUBLIC cuda_std_20)
     target_link_libraries(rex_engine INTERFACE rex_gpu)
   else()
     message(WARNING "REX_ENABLE_CUDA=ON but no CUDA compiler was found; skipping rex_gpu.")
@@ -129,6 +138,20 @@ if(REX_ENABLE_PYTHON)
       add_test(
         NAME rex_python_api_test
         COMMAND ${Python_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/python_api_test.py $<TARGET_FILE:rex_py>)
+
+      set(REX_PROPERTY_TEST_PYTHON "/home/chris/.codex-tooling/pybind11-venv/bin/python")
+      if(EXISTS ${REX_PROPERTY_TEST_PYTHON})
+        add_test(
+          NAME rex_python_property_test
+          COMMAND ${REX_PROPERTY_TEST_PYTHON} ${PROJECT_SOURCE_DIR}/tests/python_property_test.py $<TARGET_FILE:rex_py>)
+        add_test(
+          NAME rex_python_data_test
+          COMMAND
+            ${REX_PROPERTY_TEST_PYTHON}
+            ${PROJECT_SOURCE_DIR}/tests/python_data_test.py
+            $<TARGET_FILE:rex_py>
+            ${PROJECT_SOURCE_DIR}/python/rex_data.py)
+      endif()
     endif()
   else()
     message(WARNING "REX_ENABLE_PYTHON=ON but pybind11 was not found; skipping rex_py.")

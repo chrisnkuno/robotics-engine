@@ -23,10 +23,11 @@ auto make_box_body(
   std::uint32_t index,
   const rex::math::Vec3& translation,
   const rex::math::Vec3& half_extents,
+  const rex::math::Quat& rotation = {},
   double inverse_mass = 0.0) -> rex::dynamics::BodyState {
   return {
     .id = rex::platform::EntityId{.index = index, .generation = 1},
-    .pose = rex::math::Transform{.translation = translation},
+    .pose = rex::math::Transform{.rotation = rotation, .translation = translation},
     .inverse_mass = inverse_mass,
     .shape = rex::geometry::Shape{.data = rex::geometry::Box{.half_extents = half_extents}},
   };
@@ -39,7 +40,11 @@ DemoSceneRunner::DemoSceneRunner() : engine_(config_) {
   engine_ = rex::sim::Engine{config_};
 
   const std::size_t ground_index =
-    world_.bodies.add_body(make_box_body(100, {0.0, 0.0, 0.0}, {0.7, 0.5, 0.5}));
+    world_.bodies.add_body(make_box_body(
+      100,
+      {0.0, 0.0, 0.0},
+      {0.7, 0.5, 0.5},
+      rex::math::quat_from_axis_angle({0.0, 1.0, 0.0}, 0.45)));
   const std::size_t contact_sphere_index =
     world_.bodies.add_body(make_sphere_body(101, {1.15, 0.0, 0.0}, 0.75));
   const std::size_t falling_sphere_index =

@@ -34,11 +34,14 @@ class BodyStorage {
   [[nodiscard]] auto add_body(const BodyState& state) -> std::size_t;
   [[nodiscard]] auto state(std::size_t index) const -> BodyState;
 
+  [[nodiscard]] auto id(std::size_t index) const noexcept -> rex::platform::EntityId;
   [[nodiscard]] auto pose(std::size_t index) const noexcept -> const rex::math::Transform&;
   [[nodiscard]] auto linear_velocity(std::size_t index) const noexcept -> const rex::math::Vec3&;
+  [[nodiscard]] auto angular_velocity(std::size_t index) const noexcept -> const rex::math::Vec3&;
   [[nodiscard]] auto inverse_mass(std::size_t index) const noexcept -> double;
   [[nodiscard]] auto pose_mut(std::size_t index) noexcept -> rex::math::Transform&;
   [[nodiscard]] auto linear_velocity_mut(std::size_t index) noexcept -> rex::math::Vec3&;
+  [[nodiscard]] auto angular_velocity_mut(std::size_t index) noexcept -> rex::math::Vec3&;
 
  private:
   std::vector<rex::platform::EntityId> ids_{};

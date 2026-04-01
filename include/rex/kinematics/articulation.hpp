@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstddef>
+#include <span>
 #include <vector>
 
 #include "rex/math/types.hpp"
@@ -45,5 +47,14 @@ class Articulation {
   std::vector<JointSpec> joints_{};
 };
 
-}  // namespace rex::kinematics
+[[nodiscard]] auto degrees_of_freedom(const Articulation& articulation) -> std::size_t;
+[[nodiscard]] auto forward_kinematics(
+  const Articulation& articulation,
+  std::span<const double> joint_positions) -> std::vector<rex::math::Transform>;
+[[nodiscard]] auto translational_jacobian(
+  const Articulation& articulation,
+  std::span<const double> joint_positions,
+  rex::platform::EntityId body,
+  const rex::math::Vec3& point_in_body) -> std::vector<rex::math::Vec3>;
 
+}  // namespace rex::kinematics

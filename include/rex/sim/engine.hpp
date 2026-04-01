@@ -12,12 +12,20 @@ struct EngineConfig {
   rex::dynamics::SimulationConfig simulation{};
 };
 
+struct StepProfile {
+  double integrate_ms{0.0};
+  double collision_ms{0.0};
+  double solver_ms{0.0};
+  double total_ms{0.0};
+};
+
 struct StepTrace {
   std::size_t body_count{0};
   std::size_t articulation_count{0};
   std::size_t broadphase_pair_count{0};
   std::size_t manifold_count{0};
   rex::solver::SolverResult solver{};
+  StepProfile profile{};
   std::string pipeline_summary{};
 };
 

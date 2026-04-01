@@ -9,6 +9,7 @@ The current repo deliberately starts small:
 - a concrete first-pass solver/contact design in [docs/architecture/module-graph.md](/home/chris/robotics-engine/docs/architecture/module-graph.md)
 - a smoke test that exercises the public stepping surface
 - a native replay viewer scaffold that exports SVG debug frames
+- invariant-heavy validation across collision, integration, transforms, viewer math, Python bindings, and dataset export
 
 ## Build
 
@@ -17,6 +18,21 @@ cmake -S . -B build
 cmake --build build
 ctest --test-dir build
 ```
+
+## Benchmark
+
+You can measure the current headless step throughput and viewer-projection workload with:
+
+```bash
+./build/rex_perf_app --bodies 256 --warmup 30 --steps 300 --projection-iters 2000
+```
+
+The current test matrix mixes:
+
+- deterministic regression fixtures in C++
+- finite-difference checks for discrete dynamics and kinematic Jacobians
+- randomized property tests in Python via `Hypothesis` and `NumPy`
+- replay-to-Parquet export checks via `pyarrow`
 
 ## Visualize A Demo
 
@@ -88,9 +104,11 @@ ctest --test-dir build --output-on-failure
 That module currently supports:
 
 - `EngineConfig` / `SimulationConfig` / solver and collision config structs
-- a `World` wrapper for adding spheres and boxes from Python
+- `Quat` utilities plus `quat_from_axis_angle(...)` / `integrate_rotation(...)`
+- a `World` wrapper for adding spheres and boxes from Python, including initial rotation and angular velocity
 - `Engine.step(world)` for headless stepping
 - `capture_frame(...)` and `ReplayLog` for saving `.rex` runs that the desktop viewer can open
+- `python/rex_data.py` for exporting replay logs to Arrow/Parquet tables
 
 Minimal example:
 
@@ -118,6 +136,25 @@ Then open the result in the desktop viewer:
 ```bash
 ./build/rex_viewer_app --window run.rex
 ```
+
+You can also export a replay to Parquet for notebook analysis:
+
+```python
+import importlib.util
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("rex_data", Path("python/rex_data.py"))
+rex_data = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(rex_data)
+
+rex_data.write_replay_dataset(replay, "run-dataset")
+```
+
+That writes:
+
+- `run-dataset/frames.parquet`
+- `run-dataset/bodies.parquet`
+- `run-dataset/contacts.parquet`
 
 ## Repo Layout
 

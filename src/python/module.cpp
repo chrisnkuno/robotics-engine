@@ -40,11 +40,14 @@ class PyWorld {
     const rex::math::Vec3& position,
     double radius,
     double inverse_mass,
-    const rex::math::Vec3& linear_velocity) -> std::size_t {
+    const rex::math::Vec3& linear_velocity,
+    const rex::math::Quat& rotation,
+    const rex::math::Vec3& angular_velocity) -> std::size_t {
     return add_body({
       .id = next_entity_id(),
-      .pose = rex::math::Transform{.translation = position},
+      .pose = rex::math::Transform{.rotation = rotation, .translation = position},
       .linear_velocity = linear_velocity,
+      .angular_velocity = angular_velocity,
       .inverse_mass = inverse_mass,
       .shape = rex::geometry::Shape{.data = rex::geometry::Sphere{.radius = radius}},
     });
@@ -54,11 +57,14 @@ class PyWorld {
     const rex::math::Vec3& position,
     const rex::math::Vec3& half_extents,
     double inverse_mass,
-    const rex::math::Vec3& linear_velocity) -> std::size_t {
+    const rex::math::Vec3& linear_velocity,
+    const rex::math::Quat& rotation,
+    const rex::math::Vec3& angular_velocity) -> std::size_t {
     return add_body({
       .id = next_entity_id(),
-      .pose = rex::math::Transform{.translation = position},
+      .pose = rex::math::Transform{.rotation = rotation, .translation = position},
       .linear_velocity = linear_velocity,
+      .angular_velocity = angular_velocity,
       .inverse_mass = inverse_mass,
       .shape = rex::geometry::Shape{.data = rex::geometry::Box{.half_extents = half_extents}},
     });
@@ -69,8 +75,10 @@ class PyWorld {
 
     py::dict record{};
     record["id"] = state.id;
+    record["rotation"] = state.pose.rotation;
     record["translation"] = state.pose.translation;
     record["linear_velocity"] = state.linear_velocity;
+    record["angular_velocity"] = state.angular_velocity;
     record["inverse_mass"] = state.inverse_mass;
 
     if (const auto* sphere = std::get_if<rex::geometry::Sphere>(&state.shape.data)) {
@@ -125,6 +133,20 @@ PYBIND11_MODULE(rex_py, module) {
     .def_readwrite("y", &rex::math::Vec3::y)
     .def_readwrite("z", &rex::math::Vec3::z);
 
+  py::class_<rex::math::Quat>(module, "Quat")
+    .def(py::init<double, double, double, double>(), py::arg("w") = 1.0, py::arg("x") = 0.0, py::arg("y") = 0.0, py::arg("z") = 0.0)
+    .def_readwrite("w", &rex::math::Quat::w)
+    .def_readwrite("x", &rex::math::Quat::x)
+    .def_readwrite("y", &rex::math::Quat::y)
+    .def_readwrite("z", &rex::math::Quat::z);
+  module.def("quat_from_axis_angle", &rex::math::quat_from_axis_angle, py::arg("axis"), py::arg("radians"));
+  module.def(
+    "integrate_rotation",
+    &rex::math::integrate_rotation,
+    py::arg("rotation"),
+    py::arg("angular_velocity"),
+    py::arg("dt"));
+
   py::enum_<rex::dynamics::Integrator>(module, "Integrator")
     .value("SEMI_IMPLICIT_EULER", rex::dynamics::Integrator::kSemiImplicitEuler);
 
@@ -150,7 +172,11 @@ PYBIND11_MODULE(rex_py, module) {
     .def_readwrite("velocity_iterations", &rex::solver::SolverConfig::velocity_iterations)
     .def_readwrite("position_iterations", &rex::solver::SolverConfig::position_iterations)
     .def_readwrite("warm_start", &rex::solver::SolverConfig::warm_start)
-    .def_readwrite("deterministic_ordering", &rex::solver::SolverConfig::deterministic_ordering);
+    .def_readwrite("deterministic_ordering", &rex::solver::SolverConfig::deterministic_ordering)
+    .def_readwrite("restitution", &rex::solver::SolverConfig::restitution)
+    .def_readwrite("friction_coefficient", &rex::solver::SolverConfig::friction_coefficient)
+    .def_readwrite("penetration_slop", &rex::solver::SolverConfig::penetration_slop)
+    .def_readwrite("position_correction_factor", &rex::solver::SolverConfig::position_correction_factor);
 
   py::class_<rex::collision::CollisionPipelineConfig>(module, "CollisionPipelineConfig")
     .def(py::init<>())
@@ -189,6 +215,7 @@ PYBIND11_MODULE(rex_py, module) {
     .def(py::init<>())
     .def_readonly("id", &rex::viewer::SnapshotBody::id)
     .def_readonly("shape", &rex::viewer::SnapshotBody::shape)
+    .def_readonly("rotation", &rex::viewer::SnapshotBody::rotation)
     .def_readonly("translation", &rex::viewer::SnapshotBody::translation)
     .def_readonly("dimensions", &rex::viewer::SnapshotBody::dimensions);
 
@@ -225,14 +252,18 @@ PYBIND11_MODULE(rex_py, module) {
       py::arg("position"),
       py::arg("radius"),
       py::arg("inverse_mass") = 1.0,
-      py::arg("linear_velocity") = rex::math::Vec3{})
+      py::arg("linear_velocity") = rex::math::Vec3{},
+      py::arg("rotation") = rex::math::Quat{},
+      py::arg("angular_velocity") = rex::math::Vec3{})
     .def(
       "add_box",
       &PyWorld::add_box,
       py::arg("position"),
       py::arg("half_extents"),
       py::arg("inverse_mass") = 1.0,
-      py::arg("linear_velocity") = rex::math::Vec3{})
+      py::arg("linear_velocity") = rex::math::Vec3{},
+      py::arg("rotation") = rex::math::Quat{},
+      py::arg("angular_velocity") = rex::math::Vec3{})
     .def("body", &PyWorld::body)
     .def_property_readonly("body_count", &PyWorld::body_count)
     .def_property_readonly("contact_count", &PyWorld::contact_count);

@@ -40,12 +40,20 @@ auto BodyStorage::state(std::size_t index) const -> BodyState {
   };
 }
 
+auto BodyStorage::id(std::size_t index) const noexcept -> rex::platform::EntityId {
+  return ids_[index];
+}
+
 auto BodyStorage::pose(std::size_t index) const noexcept -> const rex::math::Transform& {
   return poses_[index];
 }
 
 auto BodyStorage::linear_velocity(std::size_t index) const noexcept -> const rex::math::Vec3& {
   return linear_velocities_[index];
+}
+
+auto BodyStorage::angular_velocity(std::size_t index) const noexcept -> const rex::math::Vec3& {
+  return angular_velocities_[index];
 }
 
 auto BodyStorage::inverse_mass(std::size_t index) const noexcept -> double {
@@ -58,6 +66,10 @@ auto BodyStorage::pose_mut(std::size_t index) noexcept -> rex::math::Transform& 
 
 auto BodyStorage::linear_velocity_mut(std::size_t index) noexcept -> rex::math::Vec3& {
   return linear_velocities_[index];
+}
+
+auto BodyStorage::angular_velocity_mut(std::size_t index) noexcept -> rex::math::Vec3& {
+  return angular_velocities_[index];
 }
 
 auto build_collision_proxies(const BodyStorage& bodies) -> std::vector<rex::collision::BodyProxy> {
@@ -83,7 +95,10 @@ void integrate_unconstrained(BodyStorage& bodies, const SimulationConfig& config
 
     auto& linear_velocity = bodies.linear_velocity_mut(body_index);
     linear_velocity += config.gravity * config.step.dt;
-    bodies.pose_mut(body_index).translation += linear_velocity * config.step.dt;
+    auto& pose = bodies.pose_mut(body_index);
+    pose.translation += linear_velocity * config.step.dt;
+    pose.rotation =
+      rex::math::integrate_rotation(pose.rotation, bodies.angular_velocity(body_index), config.step.dt);
   }
 }
 

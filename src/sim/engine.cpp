@@ -1,7 +1,6 @@
 #include "rex/sim/engine.hpp"
 
-#include <algorithm>
-#include <numeric>
+#include "rex/platform/profile.hpp"
 
 namespace rex::sim {
 
@@ -12,47 +11,50 @@ auto Engine::config() const noexcept -> const EngineConfig& {
 }
 
 auto Engine::step(rex::dynamics::WorldState& world) const -> StepTrace {
-  rex::dynamics::integrate_unconstrained(world.bodies, config_.simulation);
+  StepTrace trace{};
+  {
+    REX_PROFILE_SCOPE("sim::step");
+    rex::platform::ScopedMilliseconds total_timer(trace.profile.total_ms);
 
-  const auto collision_proxies = rex::dynamics::build_collision_proxies(world.bodies);
-  const rex::collision::CollisionFrame collision_frame = rex::collision::build_frame(
-    collision_proxies,
-    world.contact_manifolds,
-    config_.simulation.collision);
-  world.contact_manifolds = collision_frame.manifolds;
-
-  const std::size_t body_count = world.bodies.size();
-  const std::size_t articulation_count = world.articulations.size();
-  const std::size_t contact_count = std::transform_reduce(
-    world.contact_manifolds.begin(),
-    world.contact_manifolds.end(),
-    std::size_t{0},
-    std::plus<>{},
-    [](const rex::collision::ContactManifold& manifold) { return manifold.point_count; });
-  const rex::solver::ConstraintAssembly constraint_assembly =
-    rex::solver::assemble_contact_rows(world.contact_manifolds);
-
-  rex::solver::SolverResult solver_result{};
-  solver_result.contact_count = contact_count;
-  solver_result.constraint_count = constraint_assembly.rows.size();
-
-  for (const auto& manifold : world.contact_manifolds) {
-    for (std::size_t point_index = 0; point_index < manifold.point_count; ++point_index) {
-      solver_result.max_penetration =
-        std::max(solver_result.max_penetration, manifold.points[point_index].penetration);
+    {
+      REX_PROFILE_SCOPE("sim::integrate");
+      rex::platform::ScopedMilliseconds integrate_timer(trace.profile.integrate_ms);
+      rex::dynamics::integrate_unconstrained(world.bodies, config_.simulation);
     }
+
+    const auto collision_proxies = rex::dynamics::build_collision_proxies(world.bodies);
+    rex::collision::CollisionFrame collision_frame{};
+    {
+      REX_PROFILE_SCOPE("sim::collision");
+      rex::platform::ScopedMilliseconds collision_timer(trace.profile.collision_ms);
+      collision_frame = rex::collision::build_frame(
+        collision_proxies,
+        world.contact_manifolds,
+        config_.simulation.collision);
+    }
+    world.contact_manifolds = collision_frame.manifolds;
+
+    const std::size_t body_count = world.bodies.size();
+    const std::size_t articulation_count = world.articulations.size();
+    {
+      REX_PROFILE_SCOPE("sim::solver");
+      rex::platform::ScopedMilliseconds solver_timer(trace.profile.solver_ms);
+      trace.solver = rex::solver::solve_contacts(
+        world.bodies,
+        world.contact_manifolds,
+        config_.simulation.solver,
+        config_.simulation.step.dt);
+    }
+
+    trace.body_count = body_count;
+    trace.articulation_count = articulation_count;
+    trace.broadphase_pair_count = collision_frame.broadphase_pairs.size();
+    trace.manifold_count = world.contact_manifolds.size();
   }
 
-  StepTrace trace{};
-  trace.body_count = body_count;
-  trace.articulation_count = articulation_count;
-  trace.broadphase_pair_count = collision_frame.broadphase_pairs.size();
-  trace.manifold_count = world.contact_manifolds.size();
-  trace.solver = solver_result;
   trace.pipeline_summary =
     "semi-implicit-euler -> articulated-body-dynamics -> broadphase -> manifolds -> " +
     rex::solver::describe(config_.simulation.solver);
-
   return trace;
 }
 

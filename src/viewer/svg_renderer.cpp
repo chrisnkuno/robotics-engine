@@ -1,13 +1,19 @@
 #include "rex/viewer/svg_renderer.hpp"
 
 #include <algorithm>
+#include <array>
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
+#include <vector>
+
+#include "rex/viewer/controller.hpp"
 
 namespace rex::viewer {
 
 namespace {
+
+constexpr double kPolygonTolerance = 1.0e-6;
 
 struct Bounds {
   double min_x{0.0};
@@ -15,6 +21,53 @@ struct Bounds {
   double min_z{0.0};
   double max_z{0.0};
 };
+
+[[nodiscard]] auto cross_z(const rex::viewer::ScreenPoint& origin, const rex::viewer::ScreenPoint& lhs, const rex::viewer::ScreenPoint& rhs)
+  -> double {
+  const double ax = lhs.x - origin.x;
+  const double ay = lhs.y - origin.y;
+  const double bx = rhs.x - origin.x;
+  const double by = rhs.y - origin.y;
+  return (ax * by) - (ay * bx);
+}
+
+[[nodiscard]] auto screen_point_less(const rex::viewer::ScreenPoint& lhs, const rex::viewer::ScreenPoint& rhs) -> bool {
+  if (lhs.x < rhs.x) {
+    return true;
+  }
+
+  if (rhs.x < lhs.x) {
+    return false;
+  }
+
+  return lhs.y < rhs.y;
+}
+
+[[nodiscard]] auto body_box_corners(const SnapshotBody& body) -> std::vector<rex::math::Vec3> {
+  const std::array<double, 2> signs = {-1.0, 1.0};
+  std::vector<rex::math::Vec3> corners{};
+  corners.reserve(8);
+  const rex::math::Transform transform{
+    .rotation = body.rotation,
+    .translation = body.translation,
+  };
+
+  for (double sx : signs) {
+    for (double sy : signs) {
+      for (double sz : signs) {
+        corners.push_back(rex::math::transform_point(
+          transform,
+          {
+            sx * body.dimensions.x,
+            sy * body.dimensions.y,
+            sz * body.dimensions.z,
+          }));
+      }
+    }
+  }
+
+  return corners;
+}
 
 [[nodiscard]] auto frame_bounds(const FrameSnapshot& frame) -> Bounds {
   Bounds bounds{};
@@ -39,8 +92,9 @@ struct Bounds {
       extend(body.translation.x - body.dimensions.x, body.translation.z - body.dimensions.x);
       extend(body.translation.x + body.dimensions.x, body.translation.z + body.dimensions.x);
     } else {
-      extend(body.translation.x - body.dimensions.x, body.translation.z - body.dimensions.z);
-      extend(body.translation.x + body.dimensions.x, body.translation.z + body.dimensions.z);
+      for (const rex::math::Vec3& corner : body_box_corners(body)) {
+        extend(corner.x, corner.z);
+      }
     }
   }
 
@@ -77,6 +131,62 @@ struct Bounds {
   return std::min(usable_width / range_x, usable_height / range_z);
 }
 
+[[nodiscard]] auto convex_hull(std::vector<rex::viewer::ScreenPoint> points)
+  -> std::vector<rex::viewer::ScreenPoint> {
+  if (points.size() <= 1) {
+    return points;
+  }
+
+  std::sort(points.begin(), points.end(), screen_point_less);
+  points.erase(
+    std::unique(
+      points.begin(),
+      points.end(),
+      [](const rex::viewer::ScreenPoint& lhs, const rex::viewer::ScreenPoint& rhs) {
+        return std::abs(lhs.x - rhs.x) <= kPolygonTolerance &&
+               std::abs(lhs.y - rhs.y) <= kPolygonTolerance;
+      }),
+    points.end());
+
+  if (points.size() <= 2) {
+    return points;
+  }
+
+  std::vector<rex::viewer::ScreenPoint> lower{};
+  for (const auto& point : points) {
+    while (lower.size() >= 2 &&
+           cross_z(lower[lower.size() - 2], lower.back(), point) <= kPolygonTolerance) {
+      lower.pop_back();
+    }
+    lower.push_back(point);
+  }
+
+  std::vector<rex::viewer::ScreenPoint> upper{};
+  for (auto it = points.rbegin(); it != points.rend(); ++it) {
+    while (upper.size() >= 2 &&
+           cross_z(upper[upper.size() - 2], upper.back(), *it) <= kPolygonTolerance) {
+      upper.pop_back();
+    }
+    upper.push_back(*it);
+  }
+
+  lower.pop_back();
+  upper.pop_back();
+  lower.insert(lower.end(), upper.begin(), upper.end());
+  return lower;
+}
+
+[[nodiscard]] auto svg_polygon_points(const std::vector<rex::viewer::ScreenPoint>& points) -> std::string {
+  std::ostringstream points_stream{};
+  for (std::size_t index = 0; index < points.size(); ++index) {
+    if (index > 0) {
+      points_stream << ' ';
+    }
+    points_stream << points[index].x << ',' << points[index].y;
+  }
+  return points_stream.str();
+}
+
 }  // namespace
 
 auto render_frame_svg(const FrameSnapshot& frame, const SvgRenderConfig& config) -> std::string {
@@ -105,12 +215,16 @@ auto render_frame_svg(const FrameSnapshot& frame, const SvgRenderConfig& config)
           << "\" r=\"" << (body.dimensions.x * scale)
           << "\" fill=\"#8db3c7\" stroke=\"#193549\" stroke-width=\"2\" />\n";
     } else {
-      const double width = body.dimensions.x * 2.0 * scale;
-      const double height = body.dimensions.z * 2.0 * scale;
-      svg << "<rect x=\"" << (cx - (width * 0.5))
-          << "\" y=\"" << (cy - (height * 0.5))
-          << "\" width=\"" << width
-          << "\" height=\"" << height
+      std::vector<rex::viewer::ScreenPoint> projected{};
+      projected.reserve(8);
+      for (const rex::math::Vec3& corner : body_box_corners(body)) {
+        projected.push_back({
+          .x = project_x(corner.x, bounds, config),
+          .y = project_y(corner.z, bounds, config),
+        });
+      }
+
+      svg << "<polygon points=\"" << svg_polygon_points(convex_hull(std::move(projected)))
           << "\" fill=\"#d9a441\" stroke=\"#5b3200\" stroke-width=\"2\" />\n";
     }
 

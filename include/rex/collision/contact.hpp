@@ -27,6 +27,8 @@ struct ContactPoint {
   rex::math::Vec3 normal{0.0, 1.0, 0.0};
   double penetration{0.0};
   double cached_normal_impulse{0.0};
+  double cached_tangent_impulse_u{0.0};
+  double cached_tangent_impulse_v{0.0};
 };
 
 struct ContactManifold {

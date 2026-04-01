@@ -8,6 +8,10 @@
 #include "rex/collision/contact.hpp"
 #include "rex/math/types.hpp"
 
+namespace rex::dynamics {
+class BodyStorage;
+}
+
 namespace rex::solver {
 
 enum class SolverType {
@@ -30,6 +34,10 @@ struct SolverConfig {
   std::size_t position_iterations{2};
   bool warm_start{true};
   bool deterministic_ordering{true};
+  double restitution{0.0};
+  double friction_coefficient{0.0};
+  double penetration_slop{1.0e-3};
+  double position_correction_factor{0.2};
 };
 
 struct SolverResult {
@@ -59,6 +67,11 @@ struct ConstraintAssembly {
 
 [[nodiscard]] auto assemble_contact_rows(std::span<const rex::collision::ContactManifold> manifolds)
   -> ConstraintAssembly;
+[[nodiscard]] auto solve_contacts(
+  rex::dynamics::BodyStorage& bodies,
+  std::span<rex::collision::ContactManifold> manifolds,
+  const SolverConfig& config,
+  double dt) -> SolverResult;
 [[nodiscard]] auto describe(const SolverConfig& config) -> std::string;
 
 }  // namespace rex::solver

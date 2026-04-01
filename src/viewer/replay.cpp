@@ -1,6 +1,8 @@
 #include "rex/viewer/replay.hpp"
 
 #include <fstream>
+#include <iomanip>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <variant>
@@ -57,7 +59,8 @@ void ReplayLog::save(const std::filesystem::path& path) const {
     throw std::runtime_error("failed to open replay file for writing: " + path.string());
   }
 
-  output << "REX_REPLAY 1\n";
+  output << std::setprecision(std::numeric_limits<double>::max_digits10);
+  output << "REX_REPLAY 3\n";
   for (const FrameSnapshot& frame : frames_) {
     output << "frame "
            << frame.frame_index << ' '
@@ -69,6 +72,10 @@ void ReplayLog::save(const std::filesystem::path& path) const {
            << frame.trace.solver.contact_count << ' '
            << frame.trace.solver.constraint_count << ' '
            << frame.trace.solver.max_penetration << ' '
+           << frame.trace.profile.integrate_ms << ' '
+           << frame.trace.profile.collision_ms << ' '
+           << frame.trace.profile.solver_ms << ' '
+           << frame.trace.profile.total_ms << ' '
            << frame.bodies.size() << ' '
            << frame.contacts.size() << '\n';
 
@@ -82,7 +89,11 @@ void ReplayLog::save(const std::filesystem::path& path) const {
              << body.translation.z << ' '
              << body.dimensions.x << ' '
              << body.dimensions.y << ' '
-             << body.dimensions.z << '\n';
+             << body.dimensions.z << ' '
+             << body.rotation.w << ' '
+             << body.rotation.x << ' '
+             << body.rotation.y << ' '
+             << body.rotation.z << '\n';
     }
 
     for (const SnapshotContact& contact : frame.contacts) {
@@ -113,7 +124,7 @@ auto ReplayLog::load(const std::filesystem::path& path) -> ReplayLog {
   std::string header{};
   int version = 0;
   input >> header >> version;
-  if (header != "REX_REPLAY" || version != 1) {
+  if (header != "REX_REPLAY" || (version != 1 && version != 2 && version != 3)) {
     throw std::runtime_error("unsupported replay file: " + path.string());
   }
 
@@ -136,8 +147,16 @@ auto ReplayLog::load(const std::filesystem::path& path) -> ReplayLog {
           >> frame.trace.manifold_count
           >> frame.trace.solver.contact_count
           >> frame.trace.solver.constraint_count
-          >> frame.trace.solver.max_penetration
-          >> body_record_count
+          >> frame.trace.solver.max_penetration;
+
+    if (version >= 3) {
+      input >> frame.trace.profile.integrate_ms
+            >> frame.trace.profile.collision_ms
+            >> frame.trace.profile.solver_ms
+            >> frame.trace.profile.total_ms;
+    }
+
+    input >> body_record_count
           >> contact_record_count;
 
     frame.bodies.reserve(body_record_count);
@@ -160,6 +179,13 @@ auto ReplayLog::load(const std::filesystem::path& path) -> ReplayLog {
 
       if (body_token != "body") {
         throw std::runtime_error("expected body record in replay: " + path.string());
+      }
+
+      if (version >= 2) {
+        input >> body.rotation.w
+              >> body.rotation.x
+              >> body.rotation.y
+              >> body.rotation.z;
       }
 
       body.shape = parse_shape_name(shape_token);
@@ -217,6 +243,7 @@ auto capture_frame(
 
     SnapshotBody body{};
     body.id = state.id;
+    body.rotation = state.pose.rotation;
     body.translation = state.pose.translation;
     body.shape = std::holds_alternative<rex::geometry::Sphere>(state.shape.data)
       ? SnapshotShapeKind::kSphere
@@ -247,4 +274,3 @@ auto capture_frame(
 }
 
 }  // namespace rex::viewer
-

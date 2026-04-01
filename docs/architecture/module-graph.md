@@ -77,7 +77,7 @@ The first implementation should optimize for robustness and determinism, not for
 - contact representation: persistent contact manifolds with up to 4 points per pair
 - broadphase: deterministic sweep-and-prune on the x-axis using bounding volumes
 - friction model: 2 tangent directions per point using a friction pyramid
-- solver: warm-started sequential impulse / projected Gauss-Seidel at the velocity level
+- solver: warm-started sequential impulse / projected Gauss-Seidel at the velocity level with cached normal and tangential impulses
 - stabilization: split impulse for penetration correction, with a small Baumgarte bias reserved for joints
 - ordering: stable body-id and manifold-id ordering on CPU to preserve replayability
 
@@ -103,6 +103,14 @@ The first implementation should optimize for robustness and determinism, not for
 ## CPU / GPU Split
 
 The CPU path remains the truth path for debugging and regression tests.
+
+Current regression policy:
+
+- closed-form checks for semi-implicit free-fall and constant-angular-velocity rotation
+- finite-difference checks for discrete transitions and kinematic Jacobians
+- algebraic transform invariants such as `T * inverse(T) = I`
+- randomized property tests for free-fall, elastic impacts, friction dissipation, and quaternion normalization
+- replay and Parquet export round-trips so the research/debug surfaces stay consistent with the engine core
 
 The first CUDA migration candidates are:
 

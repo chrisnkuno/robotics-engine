@@ -1,3 +1,4 @@
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -8,6 +9,7 @@
 #include "rex/collision/contact.hpp"
 #include "rex/dynamics/world.hpp"
 #include "rex/geometry/shapes.hpp"
+#include "rex/kinematics/articulation.hpp"
 #include "rex/solver/solver.hpp"
 #include "rex/sim/engine.hpp"
 
@@ -32,6 +34,16 @@ void expect_vec3_nearly_equal(
   expect(nearly_equal(actual.x, expected.x, tolerance), message + " (x)");
   expect(nearly_equal(actual.y, expected.y, tolerance), message + " (y)");
   expect(nearly_equal(actual.z, expected.z, tolerance), message + " (z)");
+}
+
+void expect_quat_equivalent(
+  const rex::math::Quat& actual,
+  const rex::math::Quat& expected,
+  double tolerance,
+  const std::string& message) {
+  const double alignment =
+    std::abs((actual.w * expected.w) + (actual.x * expected.x) + (actual.y * expected.y) + (actual.z * expected.z));
+  expect(nearly_equal(alignment, 1.0, tolerance), message);
 }
 
 auto make_sphere_body(
@@ -202,6 +214,8 @@ void test_persistent_manifold_keeps_cached_impulse() {
   previous.body_b = rex::platform::EntityId{.index = 9, .generation = 1};
   previous.point_count = 1;
   previous.points[0].cached_normal_impulse = 3.5;
+  previous.points[0].cached_tangent_impulse_u = -0.75;
+  previous.points[0].cached_tangent_impulse_v = 1.25;
 
   const rex::collision::CollisionFrame frame = rex::collision::build_frame(
     bodies,
@@ -212,6 +226,12 @@ void test_persistent_manifold_keeps_cached_impulse() {
   expect(
     nearly_equal(frame.manifolds[0].points[0].cached_normal_impulse, 3.5),
     "persistent manifold should keep cached impulse");
+  expect(
+    nearly_equal(frame.manifolds[0].points[0].cached_tangent_impulse_u, -0.75),
+    "persistent manifold should keep cached tangent impulse u");
+  expect(
+    nearly_equal(frame.manifolds[0].points[0].cached_tangent_impulse_v, 1.25),
+    "persistent manifold should keep cached tangent impulse v");
 }
 
 void test_nonpersistent_manifold_drops_cached_impulse() {
@@ -229,6 +249,8 @@ void test_nonpersistent_manifold_drops_cached_impulse() {
   previous.body_b = rex::platform::EntityId{.index = 9, .generation = 1};
   previous.point_count = 1;
   previous.points[0].cached_normal_impulse = 3.5;
+  previous.points[0].cached_tangent_impulse_u = -0.75;
+  previous.points[0].cached_tangent_impulse_v = 1.25;
 
   rex::collision::CollisionPipelineConfig config{};
   config.enable_persistent_manifolds = false;
@@ -240,6 +262,12 @@ void test_nonpersistent_manifold_drops_cached_impulse() {
   expect(
     nearly_equal(frame.manifolds[0].points[0].cached_normal_impulse, 0.0),
     "disabling persistence should clear cached impulse reuse");
+  expect(
+    nearly_equal(frame.manifolds[0].points[0].cached_tangent_impulse_u, 0.0),
+    "disabling persistence should clear cached tangent impulse u");
+  expect(
+    nearly_equal(frame.manifolds[0].points[0].cached_tangent_impulse_v, 0.0),
+    "disabling persistence should clear cached tangent impulse v");
 }
 
 void test_sphere_box_contact_generation() {
@@ -410,6 +438,30 @@ void test_engine_step_integrates_gravity() {
   expect(state.pose.translation.z < 1.0, "gravity should advance the body downward");
 }
 
+void test_transform_inverse_and_compose_round_trip() {
+  const rex::math::Transform transform{
+    .rotation = rex::math::quat_from_axis_angle({0.2, 1.0, -0.3}, 0.7),
+    .translation = {1.2, -0.5, 0.7},
+  };
+  const rex::math::Vec3 point{0.3, -1.1, 2.0};
+
+  const rex::math::Vec3 transformed = rex::math::transform_point(transform, point);
+  const rex::math::Vec3 recovered = rex::math::inverse_transform_point(transform, transformed);
+  const rex::math::Transform round_trip = rex::math::compose(transform, rex::math::inverse(transform));
+
+  expect_vec3_nearly_equal(recovered, point, 1.0e-9, "inverse transform should recover the original point");
+  expect_quat_equivalent(
+    round_trip.rotation,
+    rex::math::Transform::identity().rotation,
+    1.0e-9,
+    "transform composed with its inverse should recover identity rotation");
+  expect_vec3_nearly_equal(
+    round_trip.translation,
+    {0.0, 0.0, 0.0},
+    1.0e-9,
+    "transform composed with its inverse should recover zero translation");
+}
+
 void test_semi_implicit_euler_matches_closed_form_under_constant_gravity() {
   rex::sim::EngineConfig config{};
   config.simulation.gravity = {0.0, 0.0, -10.0};
@@ -442,6 +494,46 @@ void test_semi_implicit_euler_matches_closed_form_under_constant_gravity() {
 
   expect_vec3_nearly_equal(state.linear_velocity, expected_velocity, 1.0e-9, "semi-implicit velocity should match the closed form");
   expect_vec3_nearly_equal(state.pose.translation, expected_position, 1.0e-9, "semi-implicit position should match the closed form");
+}
+
+void test_angular_integration_matches_closed_form_rotation() {
+  rex::sim::EngineConfig config{};
+  config.simulation.gravity = {0.0, 0.0, 0.0};
+  config.simulation.step.dt = 0.05;
+
+  const rex::math::Quat initial_rotation = rex::math::quat_from_axis_angle({0.0, 1.0, 0.0}, 0.2);
+  const rex::math::Vec3 angular_velocity{0.0, 1.5, 0.0};
+
+  rex::sim::Engine engine{config};
+  rex::dynamics::WorldState world{};
+  const std::size_t body_index = world.bodies.add_body({
+    .id = rex::platform::EntityId{.index = 77, .generation = 1},
+    .pose = rex::math::Transform{.rotation = initial_rotation, .translation = {0.0, 0.0, 0.0}},
+    .angular_velocity = angular_velocity,
+    .inverse_mass = 1.0,
+    .shape = rex::geometry::Shape{.data = rex::geometry::Box{.half_extents = {0.4, 0.3, 0.2}}},
+  });
+
+  constexpr std::size_t kStepCount = 8;
+  for (std::size_t step_index = 0; step_index < kStepCount; ++step_index) {
+    (void)engine.step(world);
+  }
+
+  const rex::dynamics::BodyState state = world.bodies.state(body_index);
+  const rex::math::Quat expected_rotation =
+    rex::math::integrate_rotation(initial_rotation, angular_velocity, config.simulation.step.dt * static_cast<double>(kStepCount));
+  const double quat_norm = std::sqrt(
+    (state.pose.rotation.w * state.pose.rotation.w) +
+    (state.pose.rotation.x * state.pose.rotation.x) +
+    (state.pose.rotation.y * state.pose.rotation.y) +
+    (state.pose.rotation.z * state.pose.rotation.z));
+
+  expect(nearly_equal(quat_norm, 1.0, 1.0e-9), "orientation integration should preserve unit quaternions");
+  expect_quat_equivalent(
+    state.pose.rotation,
+    expected_rotation,
+    1.0e-9,
+    "angular integration should match the closed-form constant-velocity rotation");
 }
 
 void test_step_finite_difference_matches_discrete_transition_jacobian() {
@@ -479,6 +571,223 @@ void test_step_finite_difference_matches_discrete_transition_jacobian() {
   expect(nearly_equal(dnext_v_dz, 0.0, 1.0e-6), "finite-difference d(next_v)/d(z) should stay zero without contacts");
   expect(nearly_equal(dnext_z_dv, config.simulation.step.dt, 1.0e-6), "finite-difference d(next_z)/d(v) should equal dt");
   expect(nearly_equal(dnext_v_dv, 1.0, 1.0e-6), "finite-difference d(next_v)/d(v) should equal one");
+}
+
+void test_contact_solver_conserves_momentum_and_energy_for_elastic_spheres() {
+  rex::sim::EngineConfig config{};
+  config.simulation.gravity = {0.0, 0.0, 0.0};
+  config.simulation.step.dt = 0.0;
+  config.simulation.solver.restitution = 1.0;
+  config.simulation.solver.position_correction_factor = 0.0;
+  config.simulation.solver.position_iterations = 0;
+
+  rex::sim::Engine engine{config};
+  rex::dynamics::WorldState world{};
+  const std::size_t first_index = world.bodies.add_body({
+    .id = rex::platform::EntityId{.index = 1, .generation = 1},
+    .pose = rex::math::Transform{.translation = {0.0, 0.0, 0.0}},
+    .linear_velocity = {1.0, 0.0, 0.0},
+    .inverse_mass = 1.0,
+    .shape = rex::geometry::Shape{.data = rex::geometry::Sphere{.radius = 0.5}},
+  });
+  const std::size_t second_index = world.bodies.add_body({
+    .id = rex::platform::EntityId{.index = 2, .generation = 1},
+    .pose = rex::math::Transform{.translation = {0.9, 0.0, 0.0}},
+    .linear_velocity = {0.0, 0.0, 0.0},
+    .inverse_mass = 1.0,
+    .shape = rex::geometry::Shape{.data = rex::geometry::Sphere{.radius = 0.5}},
+  });
+
+  const auto momentum_before = world.bodies.linear_velocity(0) + world.bodies.linear_velocity(1);
+  const double kinetic_before =
+    0.5 * rex::math::dot(world.bodies.linear_velocity(0), world.bodies.linear_velocity(0)) +
+    0.5 * rex::math::dot(world.bodies.linear_velocity(1), world.bodies.linear_velocity(1));
+
+  (void)engine.step(world);
+
+  const auto momentum_after = world.bodies.linear_velocity(0) + world.bodies.linear_velocity(1);
+  const double kinetic_after =
+    0.5 * rex::math::dot(world.bodies.linear_velocity(0), world.bodies.linear_velocity(0)) +
+    0.5 * rex::math::dot(world.bodies.linear_velocity(1), world.bodies.linear_velocity(1));
+
+  expect_vec3_nearly_equal(momentum_after, momentum_before, 1.0e-9, "elastic contact should conserve linear momentum");
+  expect(nearly_equal(kinetic_after, kinetic_before, 1.0e-9), "elastic contact should conserve kinetic energy");
+  expect(first_index == 0, "first elastic test body index should be stable");
+  expect(second_index == 1, "second elastic test body index should be stable");
+  expect(nearly_equal(world.bodies.linear_velocity(0).x, 0.0, 1.0e-9), "equal-mass elastic spheres should swap velocities");
+  expect(nearly_equal(world.bodies.linear_velocity(1).x, 1.0, 1.0e-9), "equal-mass elastic spheres should swap velocities");
+}
+
+void test_contact_solver_friction_dissipates_tangential_motion() {
+  rex::sim::EngineConfig config{};
+  config.simulation.gravity = {0.0, 0.0, 0.0};
+  config.simulation.step.dt = 0.0;
+  config.simulation.solver.restitution = 0.0;
+  config.simulation.solver.friction_coefficient = 0.8;
+  config.simulation.solver.position_correction_factor = 0.0;
+  config.simulation.solver.position_iterations = 0;
+
+  rex::sim::Engine engine{config};
+  rex::dynamics::WorldState world{};
+  const std::size_t box_index = world.bodies.add_body(make_box_body(1, {0.0, 0.0, 0.0}, {0.5, 0.5, 0.5}, 0.0));
+  const std::size_t sphere_index = world.bodies.add_body({
+    .id = rex::platform::EntityId{.index = 2, .generation = 1},
+    .pose = rex::math::Transform{.translation = {0.8, 0.0, 0.0}},
+    .linear_velocity = {-1.0, 0.0, 0.75},
+    .inverse_mass = 1.0,
+    .shape = rex::geometry::Shape{.data = rex::geometry::Sphere{.radius = 0.4}},
+  });
+
+  const rex::math::Vec3 before_velocity = world.bodies.linear_velocity(sphere_index);
+  const double kinetic_before = rex::math::dot(before_velocity, before_velocity);
+
+  (void)engine.step(world);
+
+  const rex::dynamics::BodyState sphere = world.bodies.state(sphere_index);
+  const double kinetic_after = rex::math::dot(sphere.linear_velocity, sphere.linear_velocity);
+
+  expect(
+    std::abs(sphere.linear_velocity.z) < std::abs(before_velocity.z),
+    "friction should reduce tangential speed at the contact");
+  expect(box_index == 0, "static box index should remain stable in the friction test");
+  expect(
+    sphere.linear_velocity.x >= -1.0e-9,
+    "inelastic contact against a static wall should eliminate inward normal velocity");
+  expect(
+    kinetic_after <= kinetic_before + 1.0e-9,
+    "frictional contact should not increase kinetic energy");
+}
+
+void test_contact_solver_projects_dynamic_body_out_of_static_box() {
+  rex::sim::EngineConfig config{};
+  config.simulation.gravity = {0.0, 0.0, 0.0};
+  config.simulation.step.dt = 0.0;
+  config.simulation.solver.position_correction_factor = 1.0;
+  config.simulation.solver.position_iterations = 3;
+
+  rex::sim::Engine engine{config};
+  rex::dynamics::WorldState world{};
+  const std::size_t box_index =
+    world.bodies.add_body(make_box_body(1, {0.0, 0.0, 0.0}, {0.5, 0.5, 0.5}, 0.0));
+  const std::size_t sphere_index =
+    world.bodies.add_body(make_sphere_body(2, {0.6, 0.0, 0.0}, 0.4, 1.0));
+
+  (void)engine.step(world);
+
+  const rex::dynamics::BodyState sphere = world.bodies.state(1);
+  expect(box_index == 0, "static box index should be stable");
+  expect(sphere_index == 1, "dynamic sphere index should be stable");
+  expect(sphere.pose.translation.x > 0.6, "position projection should move the sphere away from the static box");
+}
+
+void test_rotated_sphere_box_contact_matches_local_frame_geometry() {
+  const rex::math::Quat box_rotation = rex::math::quat_from_axis_angle({0.0, 1.0, 0.0}, 0.5);
+  const rex::math::Vec3 box_center{0.0, 0.0, 0.0};
+  const rex::math::Vec3 sphere_center_world = rex::math::transform_point(
+    rex::math::Transform{.rotation = box_rotation, .translation = box_center},
+    {0.85, 0.1, 0.0});
+
+  const std::vector<rex::collision::BodyProxy> bodies = {
+    {.id = rex::platform::EntityId{.index = 1, .generation = 1},
+     .pose = rex::math::Transform{.translation = sphere_center_world},
+     .shape = rex::geometry::Shape{.data = rex::geometry::Sphere{.radius = 0.4}}},
+    {.id = rex::platform::EntityId{.index = 2, .generation = 1},
+     .pose = rex::math::Transform{.rotation = box_rotation, .translation = box_center},
+     .shape = rex::geometry::Shape{.data = rex::geometry::Box{.half_extents = {0.5, 0.5, 0.5}}}},
+  };
+
+  const rex::collision::CollisionFrame frame =
+    rex::collision::build_frame(bodies, {}, rex::collision::CollisionPipelineConfig{});
+  expect(frame.manifolds.size() == 1, "rotated sphere-box overlap should generate a manifold");
+
+  const auto& point = frame.manifolds[0].points[0];
+  const rex::math::Vec3 local_center = rex::math::inverse_transform_point(
+    rex::math::Transform{.rotation = box_rotation, .translation = box_center},
+    sphere_center_world);
+  const rex::math::Vec3 expected_local_surface{0.5, 0.1, 0.0};
+  const rex::math::Vec3 expected_surface =
+    rex::math::transform_point(rex::math::Transform{.rotation = box_rotation, .translation = box_center}, expected_local_surface);
+  const rex::math::Vec3 expected_normal =
+    rex::math::normalized_or(expected_surface - sphere_center_world, {-1.0, 0.0, 0.0});
+
+  expect(nearly_equal(local_center.x, 0.85, 1.0e-9), "test setup should place the sphere in the rotated box frame");
+  expect_vec3_nearly_equal(point.position, expected_surface, 1.0e-9, "rotated sphere-box contact point should respect the box frame");
+  expect_vec3_nearly_equal(point.normal, expected_normal, 1.0e-9, "rotated sphere-box normal should respect the box frame");
+}
+
+void test_rotated_box_box_contact_produces_unit_normal_and_positive_penetration() {
+  const std::vector<rex::collision::BodyProxy> bodies = {
+    {.id = rex::platform::EntityId{.index = 1, .generation = 1},
+     .pose = rex::math::Transform{
+       .rotation = rex::math::quat_from_axis_angle({0.0, 1.0, 0.0}, 0.25),
+       .translation = {0.0, 0.0, 0.0}},
+     .shape = rex::geometry::Shape{.data = rex::geometry::Box{.half_extents = {0.6, 0.5, 0.4}}}},
+    {.id = rex::platform::EntityId{.index = 2, .generation = 1},
+     .pose = rex::math::Transform{
+       .rotation = rex::math::quat_from_axis_angle({0.0, 1.0, 0.0}, -0.35),
+       .translation = {0.8, 0.0, 0.1}},
+     .shape = rex::geometry::Shape{.data = rex::geometry::Box{.half_extents = {0.5, 0.4, 0.5}}}},
+  };
+
+  const rex::collision::CollisionFrame frame =
+    rex::collision::build_frame(bodies, {}, rex::collision::CollisionPipelineConfig{});
+  expect(frame.manifolds.size() == 1, "rotated boxes should still collide");
+  expect(nearly_equal(rex::math::norm(frame.manifolds[0].points[0].normal), 1.0, 1.0e-9), "rotated box normals should stay unit length");
+  expect(frame.manifolds[0].points[0].penetration > 0.0, "rotated box penetration should stay positive");
+}
+
+void test_articulation_jacobian_matches_finite_difference() {
+  rex::kinematics::Articulation articulation{rex::platform::EntityId{.index = 1, .generation = 1}};
+  articulation.add_link({.body = rex::platform::EntityId{.index = 1, .generation = 1}, .mass = 1.0});
+  articulation.add_link({.body = rex::platform::EntityId{.index = 2, .generation = 1}, .mass = 1.0});
+  articulation.add_link({.body = rex::platform::EntityId{.index = 3, .generation = 1}, .mass = 1.0});
+  articulation.add_joint({
+    .type = rex::kinematics::JointType::kRevolute,
+    .parent = rex::platform::EntityId{.index = 1, .generation = 1},
+    .child = rex::platform::EntityId{.index = 2, .generation = 1},
+    .parent_from_joint = rex::math::Transform{.translation = {0.0, 0.0, 0.0}},
+    .child_from_joint = rex::math::Transform::identity(),
+    .axis = {0.0, 1.0, 0.0},
+  });
+  articulation.add_joint({
+    .type = rex::kinematics::JointType::kPrismatic,
+    .parent = rex::platform::EntityId{.index = 2, .generation = 1},
+    .child = rex::platform::EntityId{.index = 3, .generation = 1},
+    .parent_from_joint = rex::math::Transform{.translation = {1.0, 0.0, 0.0}},
+    .child_from_joint = rex::math::Transform::identity(),
+    .axis = {1.0, 0.0, 0.0},
+  });
+
+  const std::array<double, 2> positions = {0.4, 0.3};
+  const std::vector<rex::math::Vec3> jacobian = rex::kinematics::translational_jacobian(
+    articulation,
+    positions,
+    rex::platform::EntityId{.index = 3, .generation = 1},
+    {0.0, 0.0, 0.0});
+
+  expect(jacobian.size() == 2, "articulation jacobian should expose one column per dof");
+
+  constexpr double kEpsilon = 1.0e-6;
+  for (std::size_t coordinate = 0; coordinate < jacobian.size(); ++coordinate) {
+    std::array<double, 2> plus = positions;
+    std::array<double, 2> minus = positions;
+    plus[coordinate] += kEpsilon;
+    minus[coordinate] -= kEpsilon;
+
+    const auto poses_plus = rex::kinematics::forward_kinematics(articulation, plus);
+    const auto poses_minus = rex::kinematics::forward_kinematics(articulation, minus);
+    const rex::math::Vec3 point_plus =
+      rex::math::transform_point(poses_plus[2], {0.0, 0.0, 0.0});
+    const rex::math::Vec3 point_minus =
+      rex::math::transform_point(poses_minus[2], {0.0, 0.0, 0.0});
+    const rex::math::Vec3 finite_difference = (point_plus - point_minus) / (2.0 * kEpsilon);
+
+    expect_vec3_nearly_equal(
+      jacobian[coordinate],
+      finite_difference,
+      1.0e-6,
+      "articulation jacobian should match finite differences");
+  }
 }
 
 void test_solver_assembles_contact_rows() {
@@ -606,8 +915,16 @@ int main() {
   test_sphere_box_contact_matches_surface_projection();
   test_box_box_contact_stays_inside_intersection_volume();
   test_engine_step_integrates_gravity();
+  test_transform_inverse_and_compose_round_trip();
   test_semi_implicit_euler_matches_closed_form_under_constant_gravity();
+  test_angular_integration_matches_closed_form_rotation();
   test_step_finite_difference_matches_discrete_transition_jacobian();
+  test_contact_solver_conserves_momentum_and_energy_for_elastic_spheres();
+  test_contact_solver_friction_dissipates_tangential_motion();
+  test_contact_solver_projects_dynamic_body_out_of_static_box();
+  test_rotated_sphere_box_contact_matches_local_frame_geometry();
+  test_rotated_box_box_contact_produces_unit_normal_and_positive_penetration();
+  test_articulation_jacobian_matches_finite_difference();
   test_solver_assembles_contact_rows();
   test_static_body_does_not_integrate();
   test_engine_step_builds_contacts_and_solver_counts();
