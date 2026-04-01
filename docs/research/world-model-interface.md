@@ -50,6 +50,28 @@ This matters because the engine interface should support:
 - goal-conditioned planning
 - replay export for offline analysis
 
+## LeWorldModel
+
+The current public `LeWorldModel` paper and code path are:
+
+- paper: `https://arxiv.org/abs/2603.19312`
+- code: `https://github.com/lucas-maes/le-wm`
+
+The official repo positions `LeWorldModel` as a stable end-to-end JEPA world model from pixels and routes planning/evaluation through `stable-worldmodel`.
+
+In this repo, the matching adapter is:
+
+- `load_lewm_stable_worldmodel(...)`
+
+That loader is deliberately thin: it gives researchers a stable-worldmodel-backed object plus the paper metadata, and they can then wrap that object with `CallableWorldModel` for engine rollouts or planning.
+
+The intended mapping is:
+
+- `LeWorldModel` or `stable-worldmodel` checkpoint: external learned model
+- `CallableWorldModel`: engine-facing latent adapter
+- `ResearchHarness`: rollout/execution loop in this engine
+- `RandomShootingPlanner`: candidate planner over the model's latent dynamics
+
 ## Minimal JEPA Workflow
 
 ```python

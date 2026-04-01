@@ -127,6 +127,15 @@ class JEPATorchHubBundle:
     repo: str = "facebookresearch/vjepa2"
 
 
+@dataclass(frozen=True)
+class StableWorldModelBundle:
+    paper: PaperSpec
+    model: Any
+    run_name: str
+    backend: str
+    cache_dir: str | None = None
+
+
 def latest_jepa_world_model_specs() -> dict[str, PaperSpec]:
     return {
         "vjepa2": PaperSpec(
@@ -165,6 +174,18 @@ def latest_jepa_world_model_specs() -> dict[str, PaperSpec]:
             ),
             tags=("video", "representation-learning", "dense-features", "temporal-consistency"),
         ),
+        "lewm": PaperSpec(
+            key="lewm",
+            title="LeWorldModel",
+            release_date="2026-03-24",
+            url="https://arxiv.org/abs/2603.19312",
+            code_url="https://github.com/lucas-maes/le-wm",
+            summary=(
+                "A stable end-to-end JEPA world model from pixels with a small trainable footprint "
+                "and a planning/eval path built on stable-worldmodel."
+            ),
+            tags=("jepa", "world-model", "planning", "stable-worldmodel", "control"),
+        ),
     }
 
 
@@ -191,6 +212,32 @@ def load_vjepa2_torch_hub(
         action_conditioned_encoder=action_conditioned_encoder,
         action_conditioned_predictor=action_conditioned_predictor,
         repo=repo,
+    )
+
+
+def load_lewm_stable_worldmodel(
+    stable_worldmodel_module: Any | None = None,
+    *,
+    run_name: str = "pusht/lewm",
+    cache_dir: str | None = None,
+) -> StableWorldModelBundle:
+    if stable_worldmodel_module is None:
+        import stable_worldmodel as stable_worldmodel_module  # type: ignore[no-redef]
+
+    if cache_dir is None:
+        model = stable_worldmodel_module.policy.AutoCostModel(run_name)
+    else:
+        model = stable_worldmodel_module.policy.AutoCostModel(
+            run_name,
+            cache_dir=cache_dir,
+        )
+
+    return StableWorldModelBundle(
+        paper=latest_jepa_world_model_specs()["lewm"],
+        model=model,
+        run_name=run_name,
+        backend="stable_worldmodel.policy.AutoCostModel",
+        cache_dir=cache_dir,
     )
 
 

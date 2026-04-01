@@ -173,7 +173,7 @@ It currently includes:
 - `ResearchHarness` for stepping, replay capture, and rollout collection
 - `CallableWorldModel` for wrapping arbitrary research code
 - `RandomShootingPlanner` for latent-space planning
-- `load_vjepa2_torch_hub(...)` and `latest_jepa_world_model_specs()` for the current JEPA path
+- `load_vjepa2_torch_hub(...)`, `load_lewm_stable_worldmodel(...)`, and `latest_jepa_world_model_specs()` for the current JEPA / LeWorldModel path
 
 The JEPA-specific integration notes are in [world-model-interface.md](/home/chris/robotics-engine/docs/research/world-model-interface.md).
 

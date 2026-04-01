@@ -30,6 +30,23 @@ class FakeTorch:
         self.hub = FakeHub()
 
 
+class FakePolicy:
+    def __init__(self):
+        self.calls = []
+
+    def AutoCostModel(self, run_name, cache_dir=None):
+        self.calls.append((run_name, cache_dir))
+        return {
+            "run_name": run_name,
+            "cache_dir": cache_dir,
+        }
+
+
+class FakeStableWorldModel:
+    def __init__(self):
+        self.policy = FakePolicy()
+
+
 def main() -> int:
     if len(sys.argv) != 3:
         raise RuntimeError(
@@ -43,6 +60,7 @@ def main() -> int:
     assert specs["vjepa2"].release_date == "2025-06-11"
     assert specs["vjepa2_ac"].key == "vjepa2_ac"
     assert specs["vjepa2_1"].release_date == "2026-03-16"
+    assert specs["lewm"].release_date == "2026-03-24"
 
     fake_torch = FakeTorch()
     bundle = rex_research.load_vjepa2_torch_hub(fake_torch)
@@ -55,6 +73,17 @@ def main() -> int:
         ("facebookresearch/vjepa2", "vjepa2_1_vit_large_384"),
         ("facebookresearch/vjepa2", "vjepa2_ac_vit_giant"),
     ]
+
+    fake_swm = FakeStableWorldModel()
+    lewm_bundle = rex_research.load_lewm_stable_worldmodel(
+        fake_swm,
+        run_name="pusht/lewm",
+        cache_dir="/tmp/lewm-cache",
+    )
+    assert lewm_bundle.paper.key == "lewm"
+    assert lewm_bundle.model["run_name"] == "pusht/lewm"
+    assert lewm_bundle.backend == "stable_worldmodel.policy.AutoCostModel"
+    assert fake_swm.policy.calls == [("pusht/lewm", "/tmp/lewm-cache")]
 
     config = rex_py.EngineConfig()
     config.simulation.gravity = rex_py.Vec3(0.0, 0.0, 0.0)
