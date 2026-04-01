@@ -101,6 +101,10 @@ void test_replay_round_trip() {
   frame.sim_time = 0.05;
   frame.trace.body_count = 1;
   frame.trace.solver.contact_count = 1;
+  frame.trace.profile.integrate_ms = 0.1;
+  frame.trace.profile.collision_ms = 0.2;
+  frame.trace.profile.solver_ms = 0.3;
+  frame.trace.profile.total_ms = 0.7;
   frame.bodies.push_back({
       .id = rex::platform::EntityId{.index = 4, .generation = 2},
       .shape = rex::viewer::SnapshotShapeKind::kSphere,
@@ -130,6 +134,7 @@ void test_replay_round_trip() {
     frame.bodies[0].rotation,
     1.0e-9,
     "body rotation should round-trip through replay serialization");
+  expect(nearly_equal(loaded.frames()[0].trace.profile.total_ms, 0.7), "step profile should round-trip through replay serialization");
   expect(nearly_equal(loaded.frames()[0].contacts[0].penetration, 0.25), "penetration should round-trip");
 }
 
@@ -375,6 +380,60 @@ void test_rotated_box_projection_and_selection_use_quaternion_pose() {
   expect(state.selection.body_index == std::optional<std::size_t>{0}, "rotated box selection should use the projected polygon");
 }
 
+void test_projection_cache_matches_direct_projection_and_selection() {
+  rex::viewer::FrameSnapshot frame{};
+  frame.bodies.push_back({
+    .id = rex::platform::EntityId{.index = 41, .generation = 1},
+    .shape = rex::viewer::SnapshotShapeKind::kBox,
+    .rotation = rex::math::quat_from_axis_angle({0.0, 1.0, 0.0}, 0.45),
+    .translation = {0.3, 0.0, -0.2},
+    .dimensions = {0.7, 0.3, 0.4},
+  });
+  frame.bodies.push_back({
+    .id = rex::platform::EntityId{.index = 42, .generation = 1},
+    .shape = rex::viewer::SnapshotShapeKind::kSphere,
+    .translation = {1.3, 0.0, 0.2},
+    .dimensions = {0.5, 0.0, 0.0},
+  });
+  frame.contacts.push_back({
+    .body_a = rex::platform::EntityId{.index = 41, .generation = 1},
+    .body_b = rex::platform::EntityId{.index = 42, .generation = 1},
+    .position = {0.9, 0.0, 0.0},
+    .normal = {1.0, 0.0, 0.0},
+    .penetration = 0.08,
+  });
+
+  rex::viewer::ViewerState state{};
+  const rex::viewer::FrameViewport viewport{.width = 1000.0, .height = 800.0, .margin = 80.0};
+  rex::viewer::fit_camera_to_frame(state, frame, viewport);
+
+  const rex::viewer::FrameProjectionCache cache =
+    rex::viewer::build_frame_projection_cache(frame, state.camera, viewport);
+  const std::vector<rex::viewer::ScreenPoint> direct_outline =
+    rex::viewer::project_box_outline(frame.bodies[0], state.camera, viewport);
+
+  expect(cache.bodies.size() == frame.bodies.size(), "projection cache should keep one entry per body");
+  expect(cache.contacts.size() == frame.contacts.size(), "projection cache should keep one entry per contact");
+  expect(cache.bodies[0].outline.size() == direct_outline.size(), "cached box outline should match direct projection");
+  for (std::size_t index = 0; index < direct_outline.size(); ++index) {
+    expect(nearly_equal(cache.bodies[0].outline[index].x, direct_outline[index].x, 1.0e-9), "cached box outline x should match direct projection");
+    expect(nearly_equal(cache.bodies[0].outline[index].y, direct_outline[index].y, 1.0e-9), "cached box outline y should match direct projection");
+  }
+
+  const rex::viewer::ScreenPoint box_point =
+    rex::viewer::project_point(state.camera, viewport, frame.bodies[0].translation);
+  const rex::viewer::ScreenPoint contact_point =
+    rex::viewer::project_point(state.camera, viewport, frame.contacts[0].position);
+  expect(
+    rex::viewer::pick_body(cache, box_point) ==
+      rex::viewer::pick_body(frame, state.camera, viewport, box_point),
+    "cached body picking should match direct picking");
+  expect(
+    rex::viewer::pick_contact(cache, contact_point) ==
+      rex::viewer::pick_contact(frame, state.camera, viewport, contact_point),
+    "cached contact picking should match direct picking");
+}
+
 void test_demo_scene_runner_produces_monotonic_frames() {
   rex::viewer::DemoSceneRunner runner{};
   const rex::viewer::FrameSnapshot first = runner.step_frame();
@@ -400,6 +459,7 @@ int main() {
   test_viewer_timeline_mapping_and_scrubbing();
   test_viewer_selection_prefers_contacts_then_bodies();
   test_rotated_box_projection_and_selection_use_quaternion_pose();
+  test_projection_cache_matches_direct_projection_and_selection();
   test_demo_scene_runner_produces_monotonic_frames();
   std::cout << "all viewer tests passed\n";
   return 0;

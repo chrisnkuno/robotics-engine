@@ -77,9 +77,17 @@ auto benchmark_step_throughput(std::size_t body_count, std::size_t warmup_steps,
     (void)engine.step(world);
   }
 
+  double integrate_ms = 0.0;
+  double collision_ms = 0.0;
+  double solver_ms = 0.0;
+  double traced_total_ms = 0.0;
   const auto start = std::chrono::steady_clock::now();
   for (std::size_t step_index = 0; step_index < timed_steps; ++step_index) {
-    (void)engine.step(world);
+    const rex::sim::StepTrace trace = engine.step(world);
+    integrate_ms += trace.profile.integrate_ms;
+    collision_ms += trace.profile.collision_ms;
+    solver_ms += trace.profile.solver_ms;
+    traced_total_ms += trace.profile.total_ms;
   }
   const auto end = std::chrono::steady_clock::now();
   const std::chrono::duration<double> elapsed = end - start;
@@ -93,6 +101,10 @@ auto benchmark_step_throughput(std::size_t body_count, std::size_t warmup_steps,
   std::cout << "  total seconds: " << total_seconds << '\n';
   std::cout << "  ms/step: " << milliseconds_per_step << '\n';
   std::cout << "  steps/sec: " << steps_per_second << '\n';
+  std::cout << "  avg integrate ms: " << (integrate_ms / static_cast<double>(timed_steps)) << '\n';
+  std::cout << "  avg collision ms: " << (collision_ms / static_cast<double>(timed_steps)) << '\n';
+  std::cout << "  avg solver ms: " << (solver_ms / static_cast<double>(timed_steps)) << '\n';
+  std::cout << "  avg traced total ms: " << (traced_total_ms / static_cast<double>(timed_steps)) << '\n';
 }
 
 auto benchmark_viewer_projection(std::size_t iterations) -> void {
@@ -105,10 +117,10 @@ auto benchmark_viewer_projection(std::size_t iterations) -> void {
   for (std::size_t iteration = 0; iteration < iterations; ++iteration) {
     const auto& frame = replay.frames()[iteration % replay.size()];
     rex::viewer::fit_camera_to_frame(state, frame, viewport);
-    for (const auto& body : frame.bodies) {
-      if (body.shape == rex::viewer::SnapshotShapeKind::kBox) {
-        polygon_count += rex::viewer::project_box_outline(body, state.camera, viewport).size();
-      }
+    const rex::viewer::FrameProjectionCache cache =
+      rex::viewer::build_frame_projection_cache(frame, state.camera, viewport);
+    for (const auto& body : cache.bodies) {
+      polygon_count += body.outline.size();
     }
   }
   const auto end = std::chrono::steady_clock::now();

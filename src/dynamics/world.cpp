@@ -60,6 +60,10 @@ auto BodyStorage::inverse_mass(std::size_t index) const noexcept -> double {
   return inverse_masses_[index];
 }
 
+auto BodyStorage::shape(std::size_t index) const noexcept -> const rex::geometry::Shape& {
+  return shapes_[index];
+}
+
 auto BodyStorage::pose_mut(std::size_t index) noexcept -> rex::math::Transform& {
   return poses_[index];
 }

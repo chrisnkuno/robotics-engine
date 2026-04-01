@@ -21,11 +21,13 @@ ctest --test-dir build
 
 ## Benchmark
 
-You can measure the current headless step throughput and viewer-projection workload with:
+You can measure the current headless step throughput and cached viewer-projection workload with:
 
 ```bash
 ./build/rex_perf_app --bodies 256 --warmup 30 --steps 300 --projection-iters 2000
 ```
+
+The benchmark now reports average per-step `integrate`, `collision`, `solver`, and traced `total` times so you can see where changes are moving cost, not just the final wall-clock throughput.
 
 The current test matrix mixes:
 
@@ -88,6 +90,7 @@ Viewer controls:
 
 - `-DREX_ENABLE_CUDA=ON` enables a placeholder CUDA backend target when a CUDA compiler is available.
 - `-DREX_ENABLE_PYTHON=ON` builds `rex_py` when `pybind11` is installed.
+- `-DREX_ENABLE_TRACY=ON` enables Tracy-compatible profiling zones when Tracy headers are available on the include path.
 
 ## Python Research API
 

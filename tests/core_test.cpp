@@ -1,8 +1,11 @@
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <numbers>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -24,6 +27,46 @@ void expect(bool condition, const std::string& message) {
 
 auto nearly_equal(double lhs, double rhs, double tolerance = 1.0e-9) -> bool {
   return std::abs(lhs - rhs) <= tolerance;
+}
+
+auto broadphase_pair_less(const rex::collision::BroadphasePair& lhs, const rex::collision::BroadphasePair& rhs) -> bool {
+  if (lhs.body_a < rhs.body_a) {
+    return true;
+  }
+
+  if (rhs.body_a < lhs.body_a) {
+    return false;
+  }
+
+  return lhs.body_b < rhs.body_b;
+}
+
+auto make_sorted_pair(rex::platform::EntityId lhs, rex::platform::EntityId rhs) -> rex::collision::BroadphasePair {
+  return rhs < lhs
+    ? rex::collision::BroadphasePair{.body_a = rhs, .body_b = lhs}
+    : rex::collision::BroadphasePair{.body_a = lhs, .body_b = rhs};
+}
+
+auto brute_force_broadphase_pairs(std::span<const rex::collision::BodyProxy> bodies)
+  -> std::vector<rex::collision::BroadphasePair> {
+  std::vector<rex::collision::BroadphasePair> pairs{};
+  for (std::size_t lhs_index = 0; lhs_index < bodies.size(); ++lhs_index) {
+    for (std::size_t rhs_index = lhs_index + 1; rhs_index < bodies.size(); ++rhs_index) {
+      const double radius_sum =
+        rex::geometry::bounding_radius(bodies[lhs_index].shape) +
+        rex::geometry::bounding_radius(bodies[rhs_index].shape);
+      const rex::math::Vec3 delta =
+        bodies[rhs_index].pose.translation - bodies[lhs_index].pose.translation;
+      if (rex::math::dot(delta, delta) > (radius_sum * radius_sum)) {
+        continue;
+      }
+
+      pairs.push_back(make_sorted_pair(bodies[lhs_index].id, bodies[rhs_index].id));
+    }
+  }
+
+  std::sort(pairs.begin(), pairs.end(), broadphase_pair_less);
+  return pairs;
 }
 
 void expect_vec3_nearly_equal(
@@ -196,6 +239,38 @@ void test_broadphase_is_input_order_invariant() {
     expect(
       first_frame.manifolds[manifold_index].body_b == second_frame.manifolds[manifold_index].body_b,
       "manifold ordering should be deterministic across input permutations");
+  }
+}
+
+void test_broadphase_matches_bruteforce_with_large_overflow_body() {
+  const std::vector<rex::collision::BodyProxy> bodies = {
+    {.id = rex::platform::EntityId{.index = 40, .generation = 1},
+     .pose = rex::math::Transform{.translation = {0.0, 0.0, -2.0}},
+     .shape = rex::geometry::Shape{.data = rex::geometry::Box{.half_extents = {10.0, 10.0, 1.0}}}},
+    {.id = rex::platform::EntityId{.index = 5, .generation = 1},
+     .pose = rex::math::Transform{.translation = {-0.2, 0.0, 0.2}},
+     .shape = rex::geometry::Shape{.data = rex::geometry::Sphere{.radius = 0.7}}},
+    {.id = rex::platform::EntityId{.index = 7, .generation = 1},
+     .pose = rex::math::Transform{.translation = {0.6, 0.0, 0.2}},
+     .shape = rex::geometry::Shape{.data = rex::geometry::Sphere{.radius = 0.7}}},
+    {.id = rex::platform::EntityId{.index = 9, .generation = 1},
+     .pose = rex::math::Transform{
+       .rotation = rex::math::quat_from_axis_angle({0.0, 1.0, 0.0}, 0.4),
+       .translation = {2.0, 0.0, 0.1}},
+     .shape = rex::geometry::Shape{.data = rex::geometry::Box{.half_extents = {0.6, 0.5, 0.4}}}},
+    {.id = rex::platform::EntityId{.index = 11, .generation = 1},
+     .pose = rex::math::Transform{.translation = {2.7, 0.0, 0.1}},
+     .shape = rex::geometry::Shape{.data = rex::geometry::Sphere{.radius = 0.5}}},
+  };
+
+  const rex::collision::CollisionFrame frame =
+    rex::collision::build_frame(bodies, {}, rex::collision::CollisionPipelineConfig{});
+  const std::vector<rex::collision::BroadphasePair> expected = brute_force_broadphase_pairs(bodies);
+
+  expect(frame.broadphase_pairs.size() == expected.size(), "grid broadphase should match brute-force pair count");
+  for (std::size_t pair_index = 0; pair_index < expected.size(); ++pair_index) {
+    expect(frame.broadphase_pairs[pair_index].body_a == expected[pair_index].body_a, "grid broadphase should preserve brute-force pair a ids");
+    expect(frame.broadphase_pairs[pair_index].body_b == expected[pair_index].body_b, "grid broadphase should preserve brute-force pair b ids");
   }
 }
 
@@ -438,6 +513,23 @@ void test_engine_step_integrates_gravity() {
   expect(state.pose.translation.z < 1.0, "gravity should advance the body downward");
 }
 
+void test_step_profile_reports_nonnegative_phase_timings() {
+  rex::sim::Engine engine{};
+  rex::dynamics::WorldState world{};
+  (void)world.bodies.add_body(make_sphere_body(1, {0.0, 0.0, 1.0}, 0.5, 1.0));
+
+  const rex::sim::StepTrace trace = engine.step(world);
+
+  expect(trace.profile.integrate_ms >= 0.0, "integrate timing should be nonnegative");
+  expect(trace.profile.collision_ms >= 0.0, "collision timing should be nonnegative");
+  expect(trace.profile.solver_ms >= 0.0, "solver timing should be nonnegative");
+  expect(trace.profile.total_ms >= 0.0, "total timing should be nonnegative");
+  expect(
+    trace.profile.total_ms + 1.0e-9 >=
+      trace.profile.integrate_ms + trace.profile.collision_ms + trace.profile.solver_ms,
+    "total timing should cover the measured pipeline phases");
+}
+
 void test_transform_inverse_and_compose_round_trip() {
   const rex::math::Transform transform{
     .rotation = rex::math::quat_from_axis_angle({0.2, 1.0, -0.3}, 0.7),
@@ -534,6 +626,36 @@ void test_angular_integration_matches_closed_form_rotation() {
     expected_rotation,
     1.0e-9,
     "angular integration should match the closed-form constant-velocity rotation");
+}
+
+void test_shape_inverse_inertia_matches_closed_form() {
+  const rex::geometry::Shape sphere{.data = rex::geometry::Sphere{.radius = 0.5}};
+  const rex::geometry::Shape box{.data = rex::geometry::Box{.half_extents = {1.0, 2.0, 3.0}}};
+
+  const rex::math::Vec3 sphere_inverse_inertia = rex::geometry::inverse_inertia_body(sphere, 2.0);
+  const rex::math::Vec3 box_inverse_inertia = rex::geometry::inverse_inertia_body(box, 0.5);
+
+  expect_vec3_nearly_equal(
+    sphere_inverse_inertia,
+    {20.0, 20.0, 20.0},
+    1.0e-9,
+    "sphere inverse inertia should match the closed form");
+  expect_vec3_nearly_equal(
+    box_inverse_inertia,
+    {1.5 / 13.0, 0.15, 0.3},
+    1.0e-9,
+    "box inverse inertia should match the closed form");
+}
+
+void test_apply_inverse_inertia_respects_box_rotation() {
+  const rex::geometry::Shape box{.data = rex::geometry::Box{.half_extents = {1.0, 2.0, 3.0}}};
+  const rex::math::Quat rotation = rex::math::quat_from_axis_angle({0.0, 1.0, 0.0}, 0.5 * std::numbers::pi);
+  const rex::math::Vec3 world_x_response =
+    rex::geometry::apply_inverse_inertia(box, rotation, 1.0, {1.0, 0.0, 0.0});
+
+  expect(nearly_equal(world_x_response.x, 0.6, 1.0e-9), "rotated box inverse inertia should map world x onto body z");
+  expect(nearly_equal(world_x_response.y, 0.0, 1.0e-9), "rotated box inverse inertia should preserve orthogonality in y");
+  expect(nearly_equal(world_x_response.z, 0.0, 1.0e-9), "rotated box inverse inertia should not leak into world z");
 }
 
 void test_step_finite_difference_matches_discrete_transition_jacobian() {
@@ -656,6 +778,96 @@ void test_contact_solver_friction_dissipates_tangential_motion() {
   expect(
     kinetic_after <= kinetic_before + 1.0e-9,
     "frictional contact should not increase kinetic energy");
+}
+
+void test_centerline_sphere_collision_does_not_create_spin() {
+  rex::sim::EngineConfig config{};
+  config.simulation.gravity = {0.0, 0.0, 0.0};
+  config.simulation.step.dt = 0.0;
+  config.simulation.solver.restitution = 1.0;
+  config.simulation.solver.position_correction_factor = 0.0;
+  config.simulation.solver.position_iterations = 0;
+
+  rex::sim::Engine engine{config};
+  rex::dynamics::WorldState world{};
+  (void)world.bodies.add_body({
+    .id = rex::platform::EntityId{.index = 1, .generation = 1},
+    .pose = rex::math::Transform{.translation = {0.0, 0.0, 0.0}},
+    .linear_velocity = {1.0, 0.0, 0.0},
+    .inverse_mass = 1.0,
+    .shape = rex::geometry::Shape{.data = rex::geometry::Sphere{.radius = 0.5}},
+  });
+  (void)world.bodies.add_body({
+    .id = rex::platform::EntityId{.index = 2, .generation = 1},
+    .pose = rex::math::Transform{.translation = {0.9, 0.0, 0.0}},
+    .inverse_mass = 1.0,
+    .shape = rex::geometry::Shape{.data = rex::geometry::Sphere{.radius = 0.5}},
+  });
+
+  (void)engine.step(world);
+
+  expect_vec3_nearly_equal(world.bodies.angular_velocity(0), {0.0, 0.0, 0.0}, 1.0e-9, "centerline sphere contacts should not create spin on body a");
+  expect_vec3_nearly_equal(world.bodies.angular_velocity(1), {0.0, 0.0, 0.0}, 1.0e-9, "centerline sphere contacts should not create spin on body b");
+}
+
+void test_off_center_normal_contact_generates_box_spin() {
+  rex::sim::EngineConfig config{};
+  config.simulation.gravity = {0.0, 0.0, 0.0};
+  config.simulation.step.dt = 0.0;
+  config.simulation.solver.position_correction_factor = 0.0;
+  config.simulation.solver.position_iterations = 0;
+  config.simulation.solver.friction_coefficient = 0.0;
+
+  rex::sim::Engine engine{config};
+  rex::dynamics::WorldState world{};
+  (void)world.bodies.add_body({
+    .id = rex::platform::EntityId{.index = 1, .generation = 1},
+    .pose = rex::math::Transform{.translation = {0.0, 0.0, 0.0}},
+    .linear_velocity = {1.0, 0.0, 0.0},
+    .inverse_mass = 1.0,
+    .shape = rex::geometry::Shape{.data = rex::geometry::Box{.half_extents = {0.5, 0.5, 0.5}}},
+  });
+  (void)world.bodies.add_body({
+    .id = rex::platform::EntityId{.index = 2, .generation = 1},
+    .pose = rex::math::Transform{.translation = {1.1, 0.0, 0.35}},
+    .inverse_mass = 0.0,
+    .shape = rex::geometry::Shape{.data = rex::geometry::Sphere{.radius = 0.7}},
+  });
+
+  (void)engine.step(world);
+
+  expect(std::abs(world.bodies.angular_velocity(0).y) > 1.0e-6, "off-center normal impulses should create box spin");
+  expect(world.bodies.linear_velocity(0).x < 1.0, "normal impulse should reduce the incoming box speed");
+}
+
+void test_frictional_contact_generates_sphere_spin() {
+  rex::sim::EngineConfig config{};
+  config.simulation.gravity = {0.0, 0.0, 0.0};
+  config.simulation.step.dt = 0.0;
+  config.simulation.solver.position_correction_factor = 0.0;
+  config.simulation.solver.position_iterations = 0;
+  config.simulation.solver.friction_coefficient = 0.8;
+
+  rex::sim::Engine engine{config};
+  rex::dynamics::WorldState world{};
+  (void)world.bodies.add_body({
+    .id = rex::platform::EntityId{.index = 1, .generation = 1},
+    .pose = rex::math::Transform{.translation = {0.0, 0.0, 0.45}},
+    .linear_velocity = {1.0, 0.0, -0.2},
+    .inverse_mass = 1.0,
+    .shape = rex::geometry::Shape{.data = rex::geometry::Sphere{.radius = 0.5}},
+  });
+  (void)world.bodies.add_body({
+    .id = rex::platform::EntityId{.index = 2, .generation = 1},
+    .pose = rex::math::Transform{.translation = {0.0, 0.0, -0.25}},
+    .inverse_mass = 0.0,
+    .shape = rex::geometry::Shape{.data = rex::geometry::Box{.half_extents = {2.0, 2.0, 0.25}}},
+  });
+
+  (void)engine.step(world);
+
+  expect(std::abs(world.bodies.angular_velocity(0).y) > 1.0e-6, "frictional contact should generate sphere spin");
+  expect(std::abs(world.bodies.linear_velocity(0).x) < 1.0, "frictional contact should reduce tangential slip speed");
 }
 
 void test_contact_solver_projects_dynamic_body_out_of_static_box() {
@@ -906,6 +1118,7 @@ int main() {
   test_broadphase_is_stable_and_sorted();
   test_broadphase_reports_multiple_pairs_in_sorted_order();
   test_broadphase_is_input_order_invariant();
+  test_broadphase_matches_bruteforce_with_large_overflow_body();
   test_persistent_manifold_keeps_cached_impulse();
   test_nonpersistent_manifold_drops_cached_impulse();
   test_sphere_box_contact_generation();
@@ -915,12 +1128,18 @@ int main() {
   test_sphere_box_contact_matches_surface_projection();
   test_box_box_contact_stays_inside_intersection_volume();
   test_engine_step_integrates_gravity();
+  test_step_profile_reports_nonnegative_phase_timings();
   test_transform_inverse_and_compose_round_trip();
   test_semi_implicit_euler_matches_closed_form_under_constant_gravity();
   test_angular_integration_matches_closed_form_rotation();
+  test_shape_inverse_inertia_matches_closed_form();
+  test_apply_inverse_inertia_respects_box_rotation();
   test_step_finite_difference_matches_discrete_transition_jacobian();
   test_contact_solver_conserves_momentum_and_energy_for_elastic_spheres();
   test_contact_solver_friction_dissipates_tangential_motion();
+  test_centerline_sphere_collision_does_not_create_spin();
+  test_off_center_normal_contact_generates_box_spin();
+  test_frictional_contact_generates_sphere_spin();
   test_contact_solver_projects_dynamic_body_out_of_static_box();
   test_rotated_sphere_box_contact_matches_local_frame_geometry();
   test_rotated_box_box_contact_produces_unit_normal_and_positive_penetration();

@@ -448,7 +448,7 @@ auto pick_contact(
 
 void select_at_point(
   ViewerState& state,
-  const FrameSnapshot& frame,
+  const FrameSnapshot&,
   const FrameProjectionCache& cache,
   const ScreenPoint& point) {
   if (const auto contact_index = pick_contact(cache, point)) {

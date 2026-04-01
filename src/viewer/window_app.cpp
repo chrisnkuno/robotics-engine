@@ -386,7 +386,6 @@ auto draw_frame(
 
   if (state.overlay.show_contacts) {
     for (std::size_t contact_index = 0; contact_index < frame.contacts.size(); ++contact_index) {
-      const SnapshotContact& contact = frame.contacts[contact_index];
       const ProjectedContact& projected = cache.contacts[contact_index];
       SDL_Rect marker{
         .x = static_cast<int>(std::round(projected.position.x)) - 3,

@@ -21,5 +21,11 @@ struct Shape {
 };
 
 [[nodiscard]] auto bounding_radius(const Shape& shape) -> double;
+[[nodiscard]] auto inverse_inertia_body(const Shape& shape, double inverse_mass) -> rex::math::Vec3;
+[[nodiscard]] auto apply_inverse_inertia(
+  const Shape& shape,
+  const rex::math::Quat& rotation,
+  double inverse_mass,
+  const rex::math::Vec3& value) -> rex::math::Vec3;
 
 }  // namespace rex::geometry

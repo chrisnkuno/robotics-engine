@@ -39,6 +39,7 @@ class BodyStorage {
   [[nodiscard]] auto linear_velocity(std::size_t index) const noexcept -> const rex::math::Vec3&;
   [[nodiscard]] auto angular_velocity(std::size_t index) const noexcept -> const rex::math::Vec3&;
   [[nodiscard]] auto inverse_mass(std::size_t index) const noexcept -> double;
+  [[nodiscard]] auto shape(std::size_t index) const noexcept -> const rex::geometry::Shape&;
   [[nodiscard]] auto pose_mut(std::size_t index) noexcept -> rex::math::Transform&;
   [[nodiscard]] auto linear_velocity_mut(std::size_t index) noexcept -> rex::math::Vec3&;
   [[nodiscard]] auto angular_velocity_mut(std::size_t index) noexcept -> rex::math::Vec3&;

@@ -74,6 +74,7 @@ struct BodyLookupPair {
 auto apply_impulse(
   rex::dynamics::BodyStorage& bodies,
   std::size_t body_index,
+  const rex::math::Vec3& contact_position,
   const rex::math::Vec3& impulse) -> void {
   const double inverse_mass = bodies.inverse_mass(body_index);
   if (inverse_mass <= 0.0) {
@@ -81,6 +82,13 @@ auto apply_impulse(
   }
 
   bodies.linear_velocity_mut(body_index) += impulse * inverse_mass;
+  const rex::math::Vec3 lever_arm = contact_position - bodies.pose(body_index).translation;
+  const rex::math::Vec3 angular_impulse = rex::math::cross(lever_arm, impulse);
+  bodies.angular_velocity_mut(body_index) += rex::geometry::apply_inverse_inertia(
+    bodies.shape(body_index),
+    bodies.pose(body_index).rotation,
+    inverse_mass,
+    angular_impulse);
 }
 
 auto apply_position_correction(
@@ -92,6 +100,47 @@ auto apply_position_correction(
   }
 
   bodies.pose_mut(body_index).translation += delta;
+}
+
+[[nodiscard]] auto point_velocity(
+  const rex::dynamics::BodyStorage& bodies,
+  std::size_t body_index,
+  const rex::math::Vec3& contact_position) -> rex::math::Vec3 {
+  const rex::math::Vec3 lever_arm = contact_position - bodies.pose(body_index).translation;
+  return bodies.linear_velocity(body_index) +
+         rex::math::cross(bodies.angular_velocity(body_index), lever_arm);
+}
+
+[[nodiscard]] auto relative_point_velocity(
+  const rex::dynamics::BodyStorage& bodies,
+  std::size_t body_index_a,
+  std::size_t body_index_b,
+  const rex::math::Vec3& contact_position) -> rex::math::Vec3 {
+  return point_velocity(bodies, body_index_b, contact_position) -
+         point_velocity(bodies, body_index_a, contact_position);
+}
+
+[[nodiscard]] auto impulse_denominator(
+  const rex::dynamics::BodyStorage& bodies,
+  std::size_t body_index,
+  const rex::math::Vec3& contact_position,
+  const rex::math::Vec3& direction) -> double {
+  const double inverse_mass = bodies.inverse_mass(body_index);
+  if (inverse_mass <= 0.0) {
+    return 0.0;
+  }
+
+  const rex::math::Vec3 lever_arm = contact_position - bodies.pose(body_index).translation;
+  const rex::math::Vec3 angular_axis = rex::math::cross(lever_arm, direction);
+  const rex::math::Vec3 world_inverse_inertia_axis = rex::geometry::apply_inverse_inertia(
+    bodies.shape(body_index),
+    bodies.pose(body_index).rotation,
+    inverse_mass,
+    angular_axis);
+  return inverse_mass +
+         rex::math::dot(
+           rex::math::cross(world_inverse_inertia_axis, lever_arm),
+           direction);
 }
 
 }  // namespace
@@ -170,8 +219,11 @@ auto solve_contacts(
 
     for (std::size_t point_index = 0; point_index < manifold.point_count; ++point_index) {
       const rex::math::Vec3 normal = rex::math::normalized_or(manifold.points[point_index].normal);
-      const rex::math::Vec3 relative_velocity =
-        bodies.linear_velocity(body_indices.body_b) - bodies.linear_velocity(body_indices.body_a);
+      const rex::math::Vec3 relative_velocity = relative_point_velocity(
+        bodies,
+        body_indices.body_a,
+        body_indices.body_b,
+        manifold.points[point_index].position);
       const double normal_velocity = rex::math::dot(relative_velocity, normal);
       restitution_targets[manifold_index][point_index] =
         normal_velocity < 0.0 ? config.restitution * (-normal_velocity) : 0.0;
@@ -203,8 +255,16 @@ auto solve_contacts(
           (basis.u * cached_tangent_impulse_u) +
           (basis.v * cached_tangent_impulse_v);
 
-        apply_impulse(bodies, body_indices.body_a, total_impulse * -1.0);
-        apply_impulse(bodies, body_indices.body_b, total_impulse);
+        apply_impulse(
+          bodies,
+          body_indices.body_a,
+          manifold.points[point_index].position,
+          total_impulse * -1.0);
+        apply_impulse(
+          bodies,
+          body_indices.body_b,
+          manifold.points[point_index].position,
+          total_impulse);
       }
     }
   } else {
@@ -225,19 +285,22 @@ auto solve_contacts(
         continue;
       }
 
-      const double inverse_mass_a = bodies.inverse_mass(body_indices.body_a);
-      const double inverse_mass_b = bodies.inverse_mass(body_indices.body_b);
-      const double inverse_mass_sum = inverse_mass_a + inverse_mass_b;
-      if (inverse_mass_sum <= 0.0) {
-        continue;
-      }
-
       for (std::size_t point_index = 0; point_index < manifold.point_count; ++point_index) {
         auto& point = manifold.points[point_index];
         const rex::math::Vec3 normal = rex::math::normalized_or(point.normal);
         const TangentBasis basis = tangent_basis(normal);
-        const rex::math::Vec3 relative_velocity =
-          bodies.linear_velocity(body_indices.body_b) - bodies.linear_velocity(body_indices.body_a);
+        const double normal_mass =
+          impulse_denominator(bodies, body_indices.body_a, point.position, normal) +
+          impulse_denominator(bodies, body_indices.body_b, point.position, normal);
+        if (normal_mass <= 0.0) {
+          continue;
+        }
+
+        const rex::math::Vec3 relative_velocity = relative_point_velocity(
+          bodies,
+          body_indices.body_a,
+          body_indices.body_b,
+          point.position);
         const double normal_velocity = rex::math::dot(relative_velocity, normal);
         const double restitution_velocity = restitution_targets[manifold_index][point_index];
         const double positional_error = std::max(point.penetration - config.penetration_slop, 0.0);
@@ -246,7 +309,7 @@ auto solve_contacts(
         const double desired_normal_velocity = std::max(restitution_velocity, bias);
 
         const double incremental_impulse =
-          (desired_normal_velocity - normal_velocity) / inverse_mass_sum;
+          (desired_normal_velocity - normal_velocity) / normal_mass;
         const double previous_impulse = point.cached_normal_impulse;
         const double next_impulse = std::max(previous_impulse + incremental_impulse, 0.0);
         const double applied_impulse = next_impulse - previous_impulse;
@@ -256,8 +319,8 @@ auto solve_contacts(
           continue;
         }
 
-        apply_impulse(bodies, body_indices.body_a, normal * -applied_impulse);
-        apply_impulse(bodies, body_indices.body_b, normal * applied_impulse);
+        apply_impulse(bodies, body_indices.body_a, point.position, normal * -applied_impulse);
+        apply_impulse(bodies, body_indices.body_b, point.position, normal * applied_impulse);
 
         const double friction_limit = config.friction_coefficient * point.cached_normal_impulse;
         if (friction_limit <= 0.0) {
@@ -267,10 +330,20 @@ auto solve_contacts(
         }
 
         const auto solve_tangent = [&](const rex::math::Vec3& tangent, double& cached_impulse) {
-          const rex::math::Vec3 tangent_relative_velocity =
-            bodies.linear_velocity(body_indices.body_b) - bodies.linear_velocity(body_indices.body_a);
+          const double tangent_mass =
+            impulse_denominator(bodies, body_indices.body_a, point.position, tangent) +
+            impulse_denominator(bodies, body_indices.body_b, point.position, tangent);
+          if (tangent_mass <= 0.0) {
+            return;
+          }
+
+          const rex::math::Vec3 tangent_relative_velocity = relative_point_velocity(
+            bodies,
+            body_indices.body_a,
+            body_indices.body_b,
+            point.position);
           const double tangent_velocity = rex::math::dot(tangent_relative_velocity, tangent);
-          const double tangent_increment = -tangent_velocity / inverse_mass_sum;
+          const double tangent_increment = -tangent_velocity / tangent_mass;
           const double previous_tangent_impulse = cached_impulse;
           const double next_tangent_impulse = std::clamp(
             previous_tangent_impulse + tangent_increment,
@@ -282,8 +355,16 @@ auto solve_contacts(
             return;
           }
 
-          apply_impulse(bodies, body_indices.body_a, tangent * -applied_tangent_impulse);
-          apply_impulse(bodies, body_indices.body_b, tangent * applied_tangent_impulse);
+          apply_impulse(
+            bodies,
+            body_indices.body_a,
+            point.position,
+            tangent * -applied_tangent_impulse);
+          apply_impulse(
+            bodies,
+            body_indices.body_b,
+            point.position,
+            tangent * applied_tangent_impulse);
         };
 
         solve_tangent(basis.u, point.cached_tangent_impulse_u);
