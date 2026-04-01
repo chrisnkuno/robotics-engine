@@ -4,6 +4,7 @@
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <vector>
 
 #include "rex/geometry/shapes.hpp"
 #include "rex/sim/engine.hpp"
@@ -23,6 +24,10 @@ void expect(bool condition, const std::string& message) {
 
 auto nearly_equal(double lhs, double rhs, double tolerance = 1.0e-9) -> bool {
   return std::abs(lhs - rhs) <= tolerance;
+}
+
+void expect_between(double value, double lower, double upper, const std::string& message) {
+  expect(value >= lower - 1.0e-9 && value <= upper + 1.0e-9, message);
 }
 
 auto make_sphere_body(
@@ -228,6 +233,115 @@ void test_viewer_controller_overlay_toggles() {
   expect(state.camera.center_x > 0.0, "pan right should move the camera center");
 }
 
+void test_viewer_camera_fit_keeps_geometry_inside_margin() {
+  rex::viewer::FrameSnapshot frame{};
+  frame.bodies.push_back({
+    .id = rex::platform::EntityId{.index = 11, .generation = 1},
+    .shape = rex::viewer::SnapshotShapeKind::kBox,
+    .translation = {-1.6, 0.0, -0.2},
+    .dimensions = {0.7, 0.5, 0.4},
+  });
+  frame.bodies.push_back({
+    .id = rex::platform::EntityId{.index = 14, .generation = 1},
+    .shape = rex::viewer::SnapshotShapeKind::kSphere,
+    .translation = {1.4, 0.0, 1.1},
+    .dimensions = {0.6, 0.0, 0.0},
+  });
+
+  rex::viewer::ViewerState state{};
+  const rex::viewer::FrameViewport viewport{.width = 1200.0, .height = 900.0, .margin = 120.0};
+  rex::viewer::fit_camera_to_frame(state, frame, viewport);
+
+  const std::vector<rex::math::Vec3> extremal_points = {
+    {-2.3, 0.0, -0.6},
+    {-0.9, 0.0, 0.2},
+    {0.8, 0.0, 0.5},
+    {2.0, 0.0, 1.7},
+  };
+
+  for (const auto& point : extremal_points) {
+    const rex::viewer::ScreenPoint projected = rex::viewer::project_point(state.camera, viewport, point);
+    expect_between(projected.x, viewport.margin, viewport.width - viewport.margin, "camera fit should keep x within margins");
+    expect_between(projected.y, viewport.margin, viewport.height - viewport.margin, "camera fit should keep y within margins");
+  }
+}
+
+void test_viewer_timeline_mapping_and_scrubbing() {
+  const rex::viewer::ReplayLog replay = rex::viewer::build_demo_replay(5);
+  rex::viewer::ViewerState state = rex::viewer::make_viewer_state(replay);
+  const rex::viewer::FrameViewport viewport{.width = 1000.0, .height = 800.0, .margin = 80.0};
+  const rex::viewer::TimelineRect timeline = rex::viewer::timeline_rect(viewport);
+
+  expect(rex::viewer::frame_index_for_timeline(replay, timeline, timeline.left) == 0, "timeline left edge should map to the first frame");
+  expect(
+    rex::viewer::frame_index_for_timeline(replay, timeline, timeline.left + timeline.width) == replay.size() - 1,
+    "timeline right edge should map to the last frame");
+  expect(
+    rex::viewer::frame_index_for_timeline(replay, timeline, timeline.left + (timeline.width * 0.5)) == 2,
+    "timeline midpoint should map to the middle frame");
+
+  state.playback = rex::viewer::PlaybackMode::kPlaying;
+  state.selection.body_index = 0;
+  rex::viewer::scrub_to_timeline(state, replay, viewport, timeline.left + timeline.width);
+  expect(state.current_frame == replay.size() - 1, "scrubbing should update the current frame");
+  expect(state.playback == rex::viewer::PlaybackMode::kPaused, "scrubbing should pause playback for inspection");
+  expect(!state.selection.body_index.has_value(), "scrubbing should clear stale selection state");
+}
+
+void test_viewer_selection_prefers_contacts_then_bodies() {
+  rex::viewer::FrameSnapshot frame{};
+  frame.bodies.push_back({
+    .id = rex::platform::EntityId{.index = 21, .generation = 1},
+    .shape = rex::viewer::SnapshotShapeKind::kBox,
+    .translation = {0.0, 0.0, 0.0},
+    .dimensions = {0.5, 0.5, 0.5},
+  });
+  frame.bodies.push_back({
+    .id = rex::platform::EntityId{.index = 22, .generation = 1},
+    .shape = rex::viewer::SnapshotShapeKind::kSphere,
+    .translation = {1.2, 0.0, 0.0},
+    .dimensions = {0.8, 0.0, 0.0},
+  });
+  frame.contacts.push_back({
+    .body_a = rex::platform::EntityId{.index = 21, .generation = 1},
+    .body_b = rex::platform::EntityId{.index = 22, .generation = 1},
+    .position = {0.5, 0.0, 0.0},
+    .normal = {1.0, 0.0, 0.0},
+    .penetration = 0.1,
+  });
+
+  rex::viewer::ViewerState state{};
+  const rex::viewer::FrameViewport viewport{.width = 1000.0, .height = 800.0, .margin = 80.0};
+  rex::viewer::fit_camera_to_frame(state, frame, viewport);
+
+  const rex::viewer::ScreenPoint contact_point =
+    rex::viewer::project_point(state.camera, viewport, frame.contacts[0].position);
+  rex::viewer::select_at_point(state, frame, viewport, contact_point);
+  expect(state.selection.contact_index == std::optional<std::size_t>{0}, "contact picks should win when the click hits a contact");
+  expect(!state.selection.body_index.has_value(), "contact selection should clear body selection");
+
+  const rex::viewer::ScreenPoint body_point =
+    rex::viewer::project_point(state.camera, viewport, frame.bodies[0].translation);
+  rex::viewer::select_at_point(state, frame, viewport, body_point);
+  expect(state.selection.body_index == std::optional<std::size_t>{0}, "body picks should identify the hit body");
+  expect(!state.selection.contact_index.has_value(), "body selection should clear contact selection");
+
+  rex::viewer::select_at_point(state, frame, viewport, {.x = 20.0, .y = 20.0});
+  expect(!state.selection.body_index.has_value(), "clicking empty space should clear body selection");
+  expect(!state.selection.contact_index.has_value(), "clicking empty space should clear contact selection");
+}
+
+void test_demo_scene_runner_produces_monotonic_frames() {
+  rex::viewer::DemoSceneRunner runner{};
+  const rex::viewer::FrameSnapshot first = runner.step_frame();
+  const rex::viewer::FrameSnapshot second = runner.step_frame();
+
+  expect(first.frame_index == 0, "demo runner should start at frame zero");
+  expect(second.frame_index == 1, "demo runner should advance frame indices monotonically");
+  expect(second.sim_time > first.sim_time, "demo runner should advance simulation time");
+  expect(first.bodies.size() == second.bodies.size(), "demo runner should keep body count stable");
+}
+
 }  // namespace
 
 int main() {
@@ -238,6 +352,10 @@ int main() {
   test_viewer_controller_playback_and_step_commands();
   test_viewer_controller_camera_fit_and_projection();
   test_viewer_controller_overlay_toggles();
+  test_viewer_camera_fit_keeps_geometry_inside_margin();
+  test_viewer_timeline_mapping_and_scrubbing();
+  test_viewer_selection_prefers_contacts_then_bodies();
+  test_demo_scene_runner_produces_monotonic_frames();
   std::cout << "all viewer tests passed\n";
   return 0;
 }

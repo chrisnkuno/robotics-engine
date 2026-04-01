@@ -24,6 +24,16 @@ auto nearly_equal(double lhs, double rhs, double tolerance = 1.0e-9) -> bool {
   return std::abs(lhs - rhs) <= tolerance;
 }
 
+void expect_vec3_nearly_equal(
+  const rex::math::Vec3& actual,
+  const rex::math::Vec3& expected,
+  double tolerance,
+  const std::string& message) {
+  expect(nearly_equal(actual.x, expected.x, tolerance), message + " (x)");
+  expect(nearly_equal(actual.y, expected.y, tolerance), message + " (y)");
+  expect(nearly_equal(actual.z, expected.z, tolerance), message + " (z)");
+}
+
 auto make_sphere_body(
   std::uint32_t index,
   const rex::math::Vec3& translation,
@@ -270,6 +280,119 @@ void test_box_box_contact_generation() {
   expect(nearly_equal(frame.manifolds[0].points[0].penetration, 0.2), "box-box penetration should match overlap");
 }
 
+void test_collision_frame_invariants_hold_for_overlaps() {
+  const std::vector<rex::collision::BodyProxy> bodies = {
+    {.id = rex::platform::EntityId{.index = 1, .generation = 1},
+     .pose = rex::math::Transform{.translation = {0.0, 0.0, 0.0}},
+     .shape = rex::geometry::Shape{.data = rex::geometry::Sphere{.radius = 1.0}}},
+    {.id = rex::platform::EntityId{.index = 2, .generation = 1},
+     .pose = rex::math::Transform{.translation = {1.2, 0.0, 0.0}},
+     .shape = rex::geometry::Shape{.data = rex::geometry::Sphere{.radius = 1.0}}},
+    {.id = rex::platform::EntityId{.index = 3, .generation = 1},
+     .pose = rex::math::Transform{.translation = {0.4, 0.0, 0.8}},
+     .shape = rex::geometry::Shape{.data = rex::geometry::Box{.half_extents = {0.6, 0.5, 0.6}}}},
+  };
+
+  const rex::collision::CollisionFrame frame =
+    rex::collision::build_frame(bodies, {}, rex::collision::CollisionPipelineConfig{});
+
+  expect(frame.broadphase_pairs.size() == 3, "all three overlapping shapes should produce unique broadphase pairs");
+  for (std::size_t pair_index = 1; pair_index < frame.broadphase_pairs.size(); ++pair_index) {
+    const auto& previous = frame.broadphase_pairs[pair_index - 1];
+    const auto& current = frame.broadphase_pairs[pair_index];
+    expect(previous.body_a < current.body_a || (previous.body_a == current.body_a && previous.body_b < current.body_b),
+      "broadphase pairs should stay globally sorted");
+  }
+
+  for (const auto& manifold : frame.manifolds) {
+    expect(manifold.point_count > 0, "each manifold should contain at least one point");
+    for (std::size_t point_index = 0; point_index < manifold.point_count; ++point_index) {
+      const auto& point = manifold.points[point_index];
+      expect(point.penetration > 0.0, "manifold penetration must remain positive");
+      expect(nearly_equal(rex::math::norm(point.normal), 1.0, 1.0e-9), "contact normals should stay unit length");
+    }
+  }
+}
+
+void test_sphere_sphere_contact_matches_exact_geometry() {
+  const std::vector<rex::math::Vec3> rhs_positions = {
+    {1.5, 0.0, 0.0},
+    {1.2, 0.4, 0.3},
+    {0.6, 0.2, 1.1},
+  };
+
+  for (const auto& rhs_position : rhs_positions) {
+    const std::vector<rex::collision::BodyProxy> bodies = {
+      {.id = rex::platform::EntityId{.index = 1, .generation = 1},
+       .pose = rex::math::Transform{.translation = {0.0, 0.0, 0.0}},
+       .shape = rex::geometry::Shape{.data = rex::geometry::Sphere{.radius = 0.9}}},
+      {.id = rex::platform::EntityId{.index = 2, .generation = 1},
+       .pose = rex::math::Transform{.translation = rhs_position},
+       .shape = rex::geometry::Shape{.data = rex::geometry::Sphere{.radius = 0.8}}},
+    };
+    const rex::collision::CollisionFrame frame =
+      rex::collision::build_frame(bodies, {}, rex::collision::CollisionPipelineConfig{});
+
+    expect(frame.manifolds.size() == 1, "sphere-sphere overlap should yield one manifold");
+    const auto& point = frame.manifolds[0].points[0];
+    const rex::math::Vec3 delta = rhs_position - rex::math::Vec3{0.0, 0.0, 0.0};
+    const double distance = rex::math::norm(delta);
+    const rex::math::Vec3 expected_normal = rex::math::normalized_or(delta);
+    const double expected_penetration = 1.7 - distance;
+    const rex::math::Vec3 expected_position = expected_normal * (0.9 - (expected_penetration * 0.5));
+
+    expect_vec3_nearly_equal(point.normal, expected_normal, 1.0e-9, "sphere-sphere normal should match center delta");
+    expect(nearly_equal(point.penetration, expected_penetration, 1.0e-9), "sphere-sphere penetration should match exact geometry");
+    expect_vec3_nearly_equal(point.position, expected_position, 1.0e-9, "sphere-sphere contact position should lie at the overlap midpoint");
+  }
+}
+
+void test_sphere_box_contact_matches_surface_projection() {
+  const rex::math::Vec3 sphere_center{1.2, 0.2, 0.1};
+  const std::vector<rex::collision::BodyProxy> bodies = {
+    {.id = rex::platform::EntityId{.index = 1, .generation = 1},
+     .pose = rex::math::Transform{.translation = sphere_center},
+     .shape = rex::geometry::Shape{.data = rex::geometry::Sphere{.radius = 0.8}}},
+    {.id = rex::platform::EntityId{.index = 2, .generation = 1},
+     .pose = rex::math::Transform{.translation = {0.0, 0.0, 0.0}},
+     .shape = rex::geometry::Shape{.data = rex::geometry::Box{.half_extents = {0.5, 0.5, 0.5}}}},
+  };
+  const rex::collision::CollisionFrame frame =
+    rex::collision::build_frame(bodies, {}, rex::collision::CollisionPipelineConfig{});
+
+  expect(frame.manifolds.size() == 1, "sphere-box overlap should generate a manifold");
+  const auto& point = frame.manifolds[0].points[0];
+  const rex::math::Vec3 expected_surface_point{0.5, 0.2, 0.1};
+  const rex::math::Vec3 expected_box_to_sphere = sphere_center - expected_surface_point;
+  const double expected_penetration = 0.8 - rex::math::norm(expected_box_to_sphere);
+
+  expect_vec3_nearly_equal(point.position, expected_surface_point, 1.0e-9, "sphere-box contact should lie on the closest box surface point");
+  expect_vec3_nearly_equal(point.normal, {-1.0, 0.0, 0.0}, 1.0e-9, "sphere-box normal should point back toward the box");
+  expect(nearly_equal(point.penetration, expected_penetration, 1.0e-9), "sphere-box penetration should equal radius minus distance to the surface");
+}
+
+void test_box_box_contact_stays_inside_intersection_volume() {
+  const std::vector<rex::collision::BodyProxy> bodies = {
+    {.id = rex::platform::EntityId{.index = 1, .generation = 1},
+     .pose = rex::math::Transform{.translation = {0.0, 0.0, 0.0}},
+     .shape = rex::geometry::Shape{.data = rex::geometry::Box{.half_extents = {0.5, 0.6, 0.4}}}},
+    {.id = rex::platform::EntityId{.index = 2, .generation = 1},
+     .pose = rex::math::Transform{.translation = {0.8, 0.1, 0.1}},
+     .shape = rex::geometry::Shape{.data = rex::geometry::Box{.half_extents = {0.5, 0.5, 0.5}}}},
+  };
+  const rex::collision::CollisionFrame frame =
+    rex::collision::build_frame(bodies, {}, rex::collision::CollisionPipelineConfig{});
+
+  expect(frame.manifolds.size() == 1, "box-box overlap should generate one manifold");
+  const auto& point = frame.manifolds[0].points[0];
+
+  expect(nearly_equal(rex::math::norm(point.normal), 1.0, 1.0e-9), "box-box normal should be unit length");
+  expect_vec3_nearly_equal(point.normal, {1.0, 0.0, 0.0}, 1.0e-9, "box-box minimum penetration axis should be x");
+  expect(point.position.x >= 0.3 && point.position.x <= 0.5, "box-box contact x should stay inside the overlap interval");
+  expect(point.position.y >= -0.4 && point.position.y <= 0.5, "box-box contact y should stay inside the overlap interval");
+  expect(point.position.z >= -0.3 && point.position.z <= 0.4, "box-box contact z should stay inside the overlap interval");
+}
+
 void test_engine_step_integrates_gravity() {
   rex::sim::Engine engine{};
   rex::dynamics::WorldState world{};
@@ -285,6 +408,77 @@ void test_engine_step_integrates_gravity() {
   expect(trace.manifold_count == 0, "single falling body should not create manifolds");
   expect(state.linear_velocity.z < 0.0, "gravity should change velocity");
   expect(state.pose.translation.z < 1.0, "gravity should advance the body downward");
+}
+
+void test_semi_implicit_euler_matches_closed_form_under_constant_gravity() {
+  rex::sim::EngineConfig config{};
+  config.simulation.gravity = {0.0, 0.0, -10.0};
+  config.simulation.step.dt = 0.1;
+
+  rex::sim::Engine engine{config};
+  rex::dynamics::WorldState world{};
+  const rex::math::Vec3 initial_position{2.0, 0.0, 1.5};
+  const rex::math::Vec3 initial_velocity{0.5, 0.0, -1.0};
+  const std::size_t body_index = world.bodies.add_body({
+    .id = rex::platform::EntityId{.index = 99, .generation = 1},
+    .pose = rex::math::Transform{.translation = initial_position},
+    .linear_velocity = initial_velocity,
+    .inverse_mass = 1.0,
+    .shape = rex::geometry::Shape{.data = rex::geometry::Sphere{.radius = 0.25}},
+  });
+
+  constexpr std::size_t kStepCount = 5;
+  for (std::size_t step_index = 0; step_index < kStepCount; ++step_index) {
+    (void)engine.step(world);
+  }
+
+  const rex::dynamics::BodyState state = world.bodies.state(body_index);
+  const double n = static_cast<double>(kStepCount);
+  const double dt = config.simulation.step.dt;
+  const rex::math::Vec3 g = config.simulation.gravity;
+  const rex::math::Vec3 expected_velocity = initial_velocity + (g * (n * dt));
+  const rex::math::Vec3 expected_position =
+    initial_position + (initial_velocity * (n * dt)) + (g * (dt * dt * (n * (n + 1.0) * 0.5)));
+
+  expect_vec3_nearly_equal(state.linear_velocity, expected_velocity, 1.0e-9, "semi-implicit velocity should match the closed form");
+  expect_vec3_nearly_equal(state.pose.translation, expected_position, 1.0e-9, "semi-implicit position should match the closed form");
+}
+
+void test_step_finite_difference_matches_discrete_transition_jacobian() {
+  rex::sim::EngineConfig config{};
+  config.simulation.gravity = {0.0, 0.0, -10.0};
+  config.simulation.step.dt = 0.1;
+
+  auto simulate_one_step = [&](double position_z, double velocity_z) {
+    rex::sim::Engine engine{config};
+    rex::dynamics::WorldState world{};
+    const std::size_t body_index = world.bodies.add_body({
+      .id = rex::platform::EntityId{.index = 7, .generation = 1},
+      .pose = rex::math::Transform{.translation = {0.0, 0.0, position_z}},
+      .linear_velocity = {0.0, 0.0, velocity_z},
+      .inverse_mass = 1.0,
+      .shape = rex::geometry::Shape{.data = rex::geometry::Sphere{.radius = 0.25}},
+    });
+    (void)engine.step(world);
+    const rex::dynamics::BodyState state = world.bodies.state(body_index);
+    return std::pair<double, double>{state.pose.translation.z, state.linear_velocity.z};
+  };
+
+  constexpr double kEpsilon = 1.0e-6;
+  const auto position_plus = simulate_one_step(1.5 + kEpsilon, -0.7);
+  const auto position_minus = simulate_one_step(1.5 - kEpsilon, -0.7);
+  const auto velocity_plus = simulate_one_step(1.5, -0.7 + kEpsilon);
+  const auto velocity_minus = simulate_one_step(1.5, -0.7 - kEpsilon);
+
+  const double dnext_z_dz = (position_plus.first - position_minus.first) / (2.0 * kEpsilon);
+  const double dnext_v_dz = (position_plus.second - position_minus.second) / (2.0 * kEpsilon);
+  const double dnext_z_dv = (velocity_plus.first - velocity_minus.first) / (2.0 * kEpsilon);
+  const double dnext_v_dv = (velocity_plus.second - velocity_minus.second) / (2.0 * kEpsilon);
+
+  expect(nearly_equal(dnext_z_dz, 1.0, 1.0e-6), "finite-difference d(next_z)/d(z) should equal the discrete transition Jacobian");
+  expect(nearly_equal(dnext_v_dz, 0.0, 1.0e-6), "finite-difference d(next_v)/d(z) should stay zero without contacts");
+  expect(nearly_equal(dnext_z_dv, config.simulation.step.dt, 1.0e-6), "finite-difference d(next_z)/d(v) should equal dt");
+  expect(nearly_equal(dnext_v_dv, 1.0, 1.0e-6), "finite-difference d(next_v)/d(v) should equal one");
 }
 
 void test_solver_assembles_contact_rows() {
@@ -407,7 +601,13 @@ int main() {
   test_nonpersistent_manifold_drops_cached_impulse();
   test_sphere_box_contact_generation();
   test_box_box_contact_generation();
+  test_collision_frame_invariants_hold_for_overlaps();
+  test_sphere_sphere_contact_matches_exact_geometry();
+  test_sphere_box_contact_matches_surface_projection();
+  test_box_box_contact_stays_inside_intersection_volume();
   test_engine_step_integrates_gravity();
+  test_semi_implicit_euler_matches_closed_form_under_constant_gravity();
+  test_step_finite_difference_matches_discrete_transition_jacobian();
   test_solver_assembles_contact_rows();
   test_static_body_does_not_integrate();
   test_engine_step_builds_contacts_and_solver_counts();

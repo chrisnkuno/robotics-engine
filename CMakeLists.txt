@@ -148,4 +148,7 @@ if(BUILD_TESTING AND REX_ENABLE_TESTS)
 
   add_test(NAME rex_viewer_window_smoke COMMAND rex_viewer_app --demo-window 2)
   set_tests_properties(rex_viewer_window_smoke PROPERTIES ENVIRONMENT "SDL_VIDEODRIVER=dummy")
+
+  add_test(NAME rex_viewer_live_window_smoke COMMAND rex_viewer_app --live-demo-window 3)
+  set_tests_properties(rex_viewer_live_window_smoke PROPERTIES ENVIRONMENT "SDL_VIDEODRIVER=dummy")
 endif()

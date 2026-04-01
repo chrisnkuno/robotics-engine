@@ -32,6 +32,12 @@ You can also open a real desktop replay window immediately:
 ./build/rex_viewer_app --demo-window
 ```
 
+Or stream frames from a running simulation directly into the window:
+
+```bash
+./build/rex_viewer_app --live-demo-window
+```
+
 That writes:
 
 - `build/viewer-demo/demo.rex`: replay capture
@@ -58,6 +64,8 @@ Viewer controls:
 - `C`: toggle contact markers
 - `N`: toggle contact normals
 - `R`: reset camera fit
+- `Left mouse`: inspect a body or contact
+- bottom scrub bar: drag to any captured frame
 - `Esc`: quit
 
 ## Optional Features
