@@ -7,6 +7,7 @@
 
 #include "rex/geometry/shapes.hpp"
 #include "rex/sim/engine.hpp"
+#include "rex/viewer/controller.hpp"
 #include "rex/viewer/demo.hpp"
 #include "rex/viewer/replay.hpp"
 #include "rex/viewer/svg_renderer.hpp"
@@ -155,6 +156,78 @@ void test_demo_replay_has_frames_and_contacts() {
   expect(found_contact, "demo replay should include at least one visible contact");
 }
 
+void test_viewer_controller_playback_and_step_commands() {
+  const rex::viewer::ReplayLog replay = rex::viewer::build_demo_replay(5);
+  rex::viewer::ViewerState state = rex::viewer::make_viewer_state(replay);
+  const rex::viewer::FrameViewport viewport{};
+
+  expect(state.current_frame == 0, "viewer should start on the first frame");
+  expect(state.playback == rex::viewer::PlaybackMode::kPaused, "viewer should start paused");
+
+  rex::viewer::apply_command(state, replay, rex::viewer::ViewerCommand::kStepForward, viewport);
+  expect(state.current_frame == 1, "step forward should advance one frame");
+
+  rex::viewer::apply_command(state, replay, rex::viewer::ViewerCommand::kStepBackward, viewport);
+  expect(state.current_frame == 0, "step backward should rewind one frame");
+
+  rex::viewer::apply_command(state, replay, rex::viewer::ViewerCommand::kTogglePlayPause, viewport);
+  expect(state.playback == rex::viewer::PlaybackMode::kPlaying, "toggle should enter playback");
+
+  rex::viewer::update_playback(state, replay, 1.0 / 15.0);
+  expect(state.current_frame >= 1, "playback update should advance frames over time");
+
+  rex::viewer::apply_command(state, replay, rex::viewer::ViewerCommand::kTogglePlayPause, viewport);
+  expect(state.playback == rex::viewer::PlaybackMode::kPaused, "toggle should pause playback");
+}
+
+void test_viewer_controller_camera_fit_and_projection() {
+  rex::viewer::FrameSnapshot frame{};
+  frame.bodies.push_back({
+    .id = rex::platform::EntityId{.index = 1, .generation = 1},
+    .shape = rex::viewer::SnapshotShapeKind::kBox,
+    .translation = {-1.0, 0.0, 0.0},
+    .dimensions = {0.5, 0.5, 0.5},
+  });
+  frame.bodies.push_back({
+    .id = rex::platform::EntityId{.index = 2, .generation = 1},
+    .shape = rex::viewer::SnapshotShapeKind::kSphere,
+    .translation = {1.0, 0.0, 1.0},
+    .dimensions = {0.5, 0.0, 0.0},
+  });
+
+  rex::viewer::ViewerState state{};
+  const rex::viewer::FrameViewport viewport{.width = 1000.0, .height = 800.0, .margin = 100.0};
+  rex::viewer::fit_camera_to_frame(state, frame, viewport);
+
+  expect(state.camera.zoom > 0.0, "camera fit should produce a positive zoom");
+  expect(nearly_equal(state.camera.center_x, 0.0), "camera fit should center the x range");
+  expect(nearly_equal(state.camera.center_z, 0.5), "camera fit should center the z range");
+
+  const rex::viewer::ScreenPoint projected =
+    rex::viewer::project_point(state.camera, viewport, rex::math::Vec3{0.0, 0.0, 0.5});
+  expect(nearly_equal(projected.x, viewport.width * 0.5), "projection should map center x to viewport center");
+  expect(nearly_equal(projected.y, viewport.height * 0.5), "projection should map center z to viewport center");
+}
+
+void test_viewer_controller_overlay_toggles() {
+  const rex::viewer::ReplayLog replay = rex::viewer::build_demo_replay(2);
+  rex::viewer::ViewerState state = rex::viewer::make_viewer_state(replay);
+  const rex::viewer::FrameViewport viewport{};
+
+  rex::viewer::apply_command(state, replay, rex::viewer::ViewerCommand::kToggleContacts, viewport);
+  expect(!state.overlay.show_contacts, "contact toggle should hide contacts");
+
+  rex::viewer::apply_command(state, replay, rex::viewer::ViewerCommand::kToggleNormals, viewport);
+  expect(!state.overlay.show_normals, "normal toggle should hide normals");
+
+  const double initial_zoom = state.camera.zoom;
+  rex::viewer::apply_command(state, replay, rex::viewer::ViewerCommand::kZoomIn, viewport);
+  expect(state.camera.zoom > initial_zoom, "zoom in should increase zoom");
+
+  rex::viewer::apply_command(state, replay, rex::viewer::ViewerCommand::kPanRight, viewport);
+  expect(state.camera.center_x > 0.0, "pan right should move the camera center");
+}
+
 }  // namespace
 
 int main() {
@@ -162,6 +235,9 @@ int main() {
   test_replay_round_trip();
   test_svg_render_includes_shapes_and_contacts();
   test_demo_replay_has_frames_and_contacts();
+  test_viewer_controller_playback_and_step_commands();
+  test_viewer_controller_camera_fit_and_projection();
+  test_viewer_controller_overlay_toggles();
   std::cout << "all viewer tests passed\n";
   return 0;
 }

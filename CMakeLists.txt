@@ -18,6 +18,7 @@ include(CTest)
 
 function(rex_configure_target target)
   target_compile_features(${target} PUBLIC cxx_std_20)
+  set_target_properties(${target} PROPERTIES POSITION_INDEPENDENT_CODE ON)
   target_include_directories(
     ${target}
     PUBLIC
@@ -62,9 +63,22 @@ add_library(rex_sim STATIC src/sim/engine.cpp)
 rex_configure_target(rex_sim)
 target_link_libraries(rex_sim PUBLIC rex_dynamics rex_solver)
 
-add_library(rex_viewer STATIC src/viewer/demo.cpp src/viewer/replay.cpp src/viewer/svg_renderer.cpp)
+add_library(rex_viewer STATIC src/viewer/controller.cpp src/viewer/demo.cpp src/viewer/replay.cpp src/viewer/svg_renderer.cpp)
 rex_configure_target(rex_viewer)
 target_link_libraries(rex_viewer PUBLIC rex_sim)
+
+set(REX_SDL2_INCLUDE_DIR "${PROJECT_SOURCE_DIR}/third_party/sdl2-dev/usr/include")
+set(REX_SDL2_CONFIG_INCLUDE_DIR "${PROJECT_SOURCE_DIR}/third_party/sdl2-dev/usr/include/x86_64-linux-gnu")
+set(REX_SDL2_SHARED_LIB "/lib/x86_64-linux-gnu/libSDL2-2.0.so.0")
+
+add_library(rex_viewer_window STATIC src/viewer/window_app.cpp)
+rex_configure_target(rex_viewer_window)
+target_include_directories(
+  rex_viewer_window
+  PRIVATE
+    ${REX_SDL2_INCLUDE_DIR}
+    ${REX_SDL2_CONFIG_INCLUDE_DIR})
+target_link_libraries(rex_viewer_window PUBLIC rex_viewer PRIVATE ${REX_SDL2_SHARED_LIB})
 
 add_library(rex_engine INTERFACE)
 target_link_libraries(
@@ -78,7 +92,8 @@ target_link_libraries(
     rex_platform
     rex_sim
     rex_solver
-    rex_viewer)
+    rex_viewer
+    rex_viewer_window)
 
 add_executable(rex_viewer_app apps/rex_viewer_main.cpp)
 rex_configure_target(rex_viewer_app)
@@ -102,11 +117,19 @@ if(REX_ENABLE_CUDA)
 endif()
 
 if(REX_ENABLE_PYTHON)
+  set(PYBIND11_FINDPYTHON ON)
+  find_package(Python COMPONENTS Interpreter Development REQUIRED)
   find_package(pybind11 CONFIG QUIET)
 
   if(pybind11_FOUND)
     pybind11_add_module(rex_py src/python/module.cpp)
     target_link_libraries(rex_py PRIVATE rex_engine)
+
+    if(BUILD_TESTING AND REX_ENABLE_TESTS)
+      add_test(
+        NAME rex_python_api_test
+        COMMAND ${Python_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/python_api_test.py $<TARGET_FILE:rex_py>)
+    endif()
   else()
     message(WARNING "REX_ENABLE_PYTHON=ON but pybind11 was not found; skipping rex_py.")
   endif()
@@ -122,4 +145,7 @@ if(BUILD_TESTING AND REX_ENABLE_TESTS)
   rex_configure_target(rex_viewer_tests)
   target_link_libraries(rex_viewer_tests PRIVATE rex_engine)
   add_test(NAME rex_viewer_tests COMMAND rex_viewer_tests)
+
+  add_test(NAME rex_viewer_window_smoke COMMAND rex_viewer_app --demo-window 2)
+  set_tests_properties(rex_viewer_window_smoke PROPERTIES ENVIRONMENT "SDL_VIDEODRIVER=dummy")
 endif()

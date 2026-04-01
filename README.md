@@ -26,6 +26,12 @@ After building, you can generate a demo replay and SVG frames with:
 ./build/rex_viewer_app --demo build/viewer-demo
 ```
 
+You can also open a real desktop replay window immediately:
+
+```bash
+./build/rex_viewer_app --demo-window
+```
+
 That writes:
 
 - `build/viewer-demo/demo.rex`: replay capture
@@ -37,10 +43,73 @@ You can also export SVGs from an existing replay:
 ./build/rex_viewer_app path/to/run.rex build/viewer-export
 ```
 
+Or open an existing replay in the native viewer:
+
+```bash
+./build/rex_viewer_app --window path/to/run.rex
+```
+
+Viewer controls:
+
+- `Space`: play/pause
+- `Left` / `Right`: step backward/forward
+- `W A S D`: pan camera
+- `+` / `-`: zoom
+- `C`: toggle contact markers
+- `N`: toggle contact normals
+- `R`: reset camera fit
+- `Esc`: quit
+
 ## Optional Features
 
 - `-DREX_ENABLE_CUDA=ON` enables a placeholder CUDA backend target when a CUDA compiler is available.
 - `-DREX_ENABLE_PYTHON=ON` builds `rex_py` when `pybind11` is installed.
+
+## Python Research API
+
+The first research-facing surface is a Python module built with `pybind11`. Configure it by pointing CMake at the installed `pybind11` package:
+
+```bash
+cmake -S . -B build \
+  -DREX_ENABLE_PYTHON=ON \
+  -Dpybind11_DIR="$(python -m pybind11 --cmakedir)"
+cmake --build build
+ctest --test-dir build --output-on-failure
+```
+
+That module currently supports:
+
+- `EngineConfig` / `SimulationConfig` / solver and collision config structs
+- a `World` wrapper for adding spheres and boxes from Python
+- `Engine.step(world)` for headless stepping
+- `capture_frame(...)` and `ReplayLog` for saving `.rex` runs that the desktop viewer can open
+
+Minimal example:
+
+```python
+import rex_py
+
+config = rex_py.EngineConfig()
+config.simulation.gravity = rex_py.Vec3(0.0, 0.0, 0.0)
+
+engine = rex_py.Engine(config)
+world = rex_py.World()
+world.add_box(rex_py.Vec3(0.0, 0.0, 0.0), rex_py.Vec3(0.5, 0.5, 0.5), inverse_mass=0.0)
+world.add_sphere(rex_py.Vec3(0.9, 0.0, 0.0), radius=0.6)
+
+trace = engine.step(world)
+frame = rex_py.capture_frame(world, trace, frame_index=0, sim_time=0.0)
+
+replay = rex_py.ReplayLog()
+replay.add_frame(frame)
+replay.save("run.rex")
+```
+
+Then open the result in the desktop viewer:
+
+```bash
+./build/rex_viewer_app --window run.rex
+```
 
 ## Repo Layout
 

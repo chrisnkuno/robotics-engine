@@ -34,28 +34,34 @@ auto make_box_body(
 
 }  // namespace
 
-auto build_demo_replay(std::size_t frame_count) -> ReplayLog {
-  rex::sim::EngineConfig config{};
-  config.simulation.gravity = {0.0, 0.0, -9.81};
+DemoSceneRunner::DemoSceneRunner() : engine_(config_) {
+  config_.simulation.gravity = {0.0, 0.0, -9.81};
+  engine_ = rex::sim::Engine{config_};
 
-  rex::sim::Engine engine{config};
-  rex::dynamics::WorldState world{};
   const std::size_t ground_index =
-    world.bodies.add_body(make_box_body(100, {0.0, 0.0, 0.0}, {0.7, 0.5, 0.5}));
+    world_.bodies.add_body(make_box_body(100, {0.0, 0.0, 0.0}, {0.7, 0.5, 0.5}));
   const std::size_t contact_sphere_index =
-    world.bodies.add_body(make_sphere_body(101, {1.15, 0.0, 0.0}, 0.75));
+    world_.bodies.add_body(make_sphere_body(101, {1.15, 0.0, 0.0}, 0.75));
   const std::size_t falling_sphere_index =
-    world.bodies.add_body(make_sphere_body(102, {-0.6, 0.0, 2.4}, 0.35));
+    world_.bodies.add_body(make_sphere_body(102, {-0.6, 0.0, 2.4}, 0.35));
   (void)ground_index;
   (void)contact_sphere_index;
   (void)falling_sphere_index;
+}
 
+auto DemoSceneRunner::step_frame() -> FrameSnapshot {
+  const rex::sim::StepTrace trace = engine_.step(world_);
+  FrameSnapshot frame = capture_frame(world_, trace, next_frame_index_, sim_time_);
+  ++next_frame_index_;
+  sim_time_ += config_.simulation.step.dt;
+  return frame;
+}
+
+auto build_demo_replay(std::size_t frame_count) -> ReplayLog {
+  DemoSceneRunner runner{};
   ReplayLog replay{};
-  double sim_time = 0.0;
   for (std::size_t frame_index = 0; frame_index < frame_count; ++frame_index) {
-    const rex::sim::StepTrace trace = engine.step(world);
-    replay.add_frame(capture_frame(world, trace, frame_index, sim_time));
-    sim_time += config.simulation.step.dt;
+    replay.add_frame(runner.step_frame());
   }
 
   return replay;
