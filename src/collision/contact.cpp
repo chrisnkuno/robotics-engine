@@ -396,6 +396,19 @@ void append_grid_memberships(
   return (axis_n * coordinate_n) + (axis_t1 * coordinate_t1) + (axis_t2 * coordinate_t2);
 }
 
+void assign_contact_features(
+  const BodyProxy& body_a,
+  const BodyProxy& body_b,
+  ContactPoint& point,
+  const rex::math::Vec3& anchor_world_a,
+  const rex::math::Vec3& anchor_world_b,
+  const rex::math::Vec3& normal_world) {
+  point.local_anchor_a = rex::math::inverse_transform_point(body_a.pose, anchor_world_a);
+  point.local_anchor_b = rex::math::inverse_transform_point(body_b.pose, anchor_world_b);
+  point.local_normal_a = rex::math::inverse_rotate(body_a.pose.rotation, normal_world);
+  point.local_normal_b = rex::math::inverse_rotate(body_b.pose.rotation, -normal_world);
+}
+
 [[nodiscard]] auto build_sphere_sphere_contact(const BodyProxy& lhs, const BodyProxy& rhs)
   -> std::optional<ContactManifold> {
   const auto* lhs_sphere = std::get_if<rex::geometry::Sphere>(&lhs.shape.data);
@@ -422,6 +435,13 @@ void append_grid_memberships(
   manifold.points[0].penetration = penetration;
   manifold.points[0].position =
     lhs.pose.translation + normal * (lhs_sphere->radius - (penetration * 0.5));
+  assign_contact_features(
+    lhs,
+    rhs,
+    manifold.points[0],
+    lhs.pose.translation + (normal * lhs_sphere->radius),
+    rhs.pose.translation - (normal * rhs_sphere->radius),
+    normal);
   return manifold;
 }
 
@@ -466,6 +486,25 @@ void append_grid_memberships(
     rex::math::normalized_or(sphere_is_body_a ? (box_to_sphere * -1.0) : box_to_sphere);
   manifold.points[0].penetration = penetration;
   manifold.points[0].position = surface_point;
+  const rex::math::Vec3 sphere_anchor =
+    sphere_center + (manifold.points[0].normal * sphere.radius * (sphere_is_body_a ? 1.0 : -1.0));
+  if (sphere_is_body_a) {
+    assign_contact_features(
+      sphere_body,
+      box_body,
+      manifold.points[0],
+      sphere_anchor,
+      surface_point,
+      manifold.points[0].normal);
+  } else {
+    assign_contact_features(
+      box_body,
+      sphere_body,
+      manifold.points[0],
+      surface_point,
+      sphere_anchor,
+      manifold.points[0].normal);
+  }
   return manifold;
 }
 
@@ -511,6 +550,13 @@ void append_grid_memberships(
   manifold.points[0].normal = normal;
   manifold.points[0].penetration = penetration;
   manifold.points[0].position = contact_point_from_reference_face(lhs_obb, rhs_obb, normal);
+  assign_contact_features(
+    lhs,
+    rhs,
+    manifold.points[0],
+    manifold.points[0].position + (normal * (penetration * 0.5)),
+    manifold.points[0].position - (normal * (penetration * 0.5)),
+    normal);
   return manifold;
 }
 

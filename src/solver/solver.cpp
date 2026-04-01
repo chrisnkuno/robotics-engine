@@ -243,42 +243,31 @@ auto apply_position_impulse(
   return prepared;
 }
 
-[[nodiscard]] auto body_proxy(const rex::dynamics::BodyStorage& bodies, std::size_t body_index)
-  -> rex::collision::BodyProxy {
-  return {
-    .id = bodies.id(body_index),
-    .pose = bodies.pose(body_index),
-    .shape = bodies.shape(body_index),
-  };
-}
-
 void refresh_manifold_geometry(
-  rex::dynamics::BodyStorage& bodies,
+  const rex::dynamics::BodyStorage& bodies,
   BodyLookupPair body_indices,
   rex::collision::ContactManifold& manifold) {
   if (!body_indices.valid()) {
     return;
   }
 
-  auto refreshed = rex::collision::build_contact_manifold(
-    body_proxy(bodies, body_indices.body_a),
-    body_proxy(bodies, body_indices.body_b));
-  if (!refreshed.has_value()) {
-    manifold.point_count = 0;
-    return;
+  for (std::size_t point_index = 0; point_index < manifold.point_count; ++point_index) {
+    auto& point = manifold.points[point_index];
+    const rex::math::Vec3 anchor_world_a =
+      rex::math::transform_point(bodies.pose(body_indices.body_a), point.local_anchor_a);
+    const rex::math::Vec3 anchor_world_b =
+      rex::math::transform_point(bodies.pose(body_indices.body_b), point.local_anchor_b);
+    const rex::math::Vec3 normal_world_a =
+      rex::math::rotate(bodies.pose(body_indices.body_a).rotation, point.local_normal_a);
+    const rex::math::Vec3 normal_world_b =
+      rex::math::rotate(bodies.pose(body_indices.body_b).rotation, point.local_normal_b);
+    const rex::math::Vec3 normal =
+      rex::math::normalized_or(normal_world_a - normal_world_b, normal_world_a);
+    const rex::math::Vec3 anchor_delta = anchor_world_b - anchor_world_a;
+    point.normal = normal;
+    point.penetration = std::max(-rex::math::dot(anchor_delta, normal), 0.0);
+    point.position = (anchor_world_a + anchor_world_b) * 0.5;
   }
-
-  const std::size_t persistent_points = std::min(manifold.point_count, refreshed->point_count);
-  for (std::size_t point_index = 0; point_index < persistent_points; ++point_index) {
-    refreshed->points[point_index].cached_normal_impulse =
-      manifold.points[point_index].cached_normal_impulse;
-    refreshed->points[point_index].cached_tangent_impulse_u =
-      manifold.points[point_index].cached_tangent_impulse_u;
-    refreshed->points[point_index].cached_tangent_impulse_v =
-      manifold.points[point_index].cached_tangent_impulse_v;
-  }
-
-  manifold = *refreshed;
 }
 
 }  // namespace

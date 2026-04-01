@@ -151,6 +151,13 @@ if(REX_ENABLE_PYTHON)
             ${PROJECT_SOURCE_DIR}/tests/python_data_test.py
             $<TARGET_FILE:rex_py>
             ${PROJECT_SOURCE_DIR}/python/rex_data.py)
+        add_test(
+          NAME rex_python_research_test
+          COMMAND
+            ${REX_PROPERTY_TEST_PYTHON}
+            ${PROJECT_SOURCE_DIR}/tests/python_research_test.py
+            $<TARGET_FILE:rex_py>
+            ${PROJECT_SOURCE_DIR}/python/rex_research.py)
       endif()
     endif()
   else()

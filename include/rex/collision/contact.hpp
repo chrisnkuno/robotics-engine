@@ -26,6 +26,10 @@ struct BroadphasePair {
 struct ContactPoint {
   rex::math::Vec3 position{};
   rex::math::Vec3 normal{0.0, 1.0, 0.0};
+  rex::math::Vec3 local_anchor_a{};
+  rex::math::Vec3 local_anchor_b{};
+  rex::math::Vec3 local_normal_a{0.0, 1.0, 0.0};
+  rex::math::Vec3 local_normal_b{0.0, -1.0, 0.0};
   double penetration{0.0};
   double cached_normal_impulse{0.0};
   double cached_tangent_impulse_u{0.0};

@@ -109,9 +109,11 @@ That module currently supports:
 - `EngineConfig` / `SimulationConfig` / solver and collision config structs
 - `Quat` utilities plus `quat_from_axis_angle(...)` / `integrate_rotation(...)`
 - a `World` wrapper for adding spheres and boxes from Python, including initial rotation and angular velocity
+- direct body-state mutation through `set_pose(...)`, `set_translation(...)`, `set_rotation(...)`, `set_linear_velocity(...)`, and `set_angular_velocity(...)`
 - `Engine.step(world)` for headless stepping
 - `capture_frame(...)` and `ReplayLog` for saving `.rex` runs that the desktop viewer can open
 - `python/rex_data.py` for exporting replay logs to Arrow/Parquet tables
+- `python/rex_research.py` for paper metadata, rollout harnesses, action application, and latent-world-model planners
 
 Minimal example:
 
@@ -159,10 +161,28 @@ That writes:
 - `run-dataset/bodies.parquet`
 - `run-dataset/contacts.parquet`
 
+## Research Interface
+
+The new high-level research surface lives in [python/rex_research.py](/home/chris/robotics-engine/python/rex_research.py).
+It is designed so researchers can keep their paper code in Python and only treat the engine as a fast simulator backend.
+
+It currently includes:
+
+- `PaperSpec` for paper/model metadata
+- `BodyCommand` for direct world edits per step
+- `ResearchHarness` for stepping, replay capture, and rollout collection
+- `CallableWorldModel` for wrapping arbitrary research code
+- `RandomShootingPlanner` for latent-space planning
+- `load_vjepa2_torch_hub(...)` and `latest_jepa_world_model_specs()` for the current JEPA path
+
+The JEPA-specific integration notes are in [world-model-interface.md](/home/chris/robotics-engine/docs/research/world-model-interface.md).
+
 ## Repo Layout
 
 - `include/rex`: public module interfaces
 - `src`: minimal implementations and backend stubs
 - `docs/architecture`: module graph and solver/contact decisions
+- `docs/research`: research-facing integration notes
 - `apps`: native tools such as the replay viewer scaffold
+- `python`: notebook/data/research helpers on top of `rex_py`
 - `tests`: smoke coverage for the initial stepping API

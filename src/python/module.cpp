@@ -94,6 +94,28 @@ class PyWorld {
     return record;
   }
 
+  void set_translation(std::size_t index, const rex::math::Vec3& translation) {
+    state_.bodies.pose_mut(index).translation = translation;
+  }
+
+  void set_rotation(std::size_t index, const rex::math::Quat& rotation) {
+    state_.bodies.pose_mut(index).rotation = rex::math::normalized_or(rotation);
+  }
+
+  void set_pose(std::size_t index, const rex::math::Vec3& translation, const rex::math::Quat& rotation) {
+    auto& pose = state_.bodies.pose_mut(index);
+    pose.translation = translation;
+    pose.rotation = rex::math::normalized_or(rotation);
+  }
+
+  void set_linear_velocity(std::size_t index, const rex::math::Vec3& linear_velocity) {
+    state_.bodies.linear_velocity_mut(index) = linear_velocity;
+  }
+
+  void set_angular_velocity(std::size_t index, const rex::math::Vec3& angular_velocity) {
+    state_.bodies.angular_velocity_mut(index) = angular_velocity;
+  }
+
   [[nodiscard]] auto state() noexcept -> rex::dynamics::WorldState& {
     return state_;
   }
@@ -199,12 +221,19 @@ PYBIND11_MODULE(rex_py, module) {
     .def_readonly("constraint_count", &rex::solver::SolverResult::constraint_count)
     .def_readonly("max_penetration", &rex::solver::SolverResult::max_penetration);
 
+  py::class_<rex::sim::StepProfile>(module, "StepProfile")
+    .def_readonly("integrate_ms", &rex::sim::StepProfile::integrate_ms)
+    .def_readonly("collision_ms", &rex::sim::StepProfile::collision_ms)
+    .def_readonly("solver_ms", &rex::sim::StepProfile::solver_ms)
+    .def_readonly("total_ms", &rex::sim::StepProfile::total_ms);
+
   py::class_<rex::sim::StepTrace>(module, "StepTrace")
     .def_readonly("body_count", &rex::sim::StepTrace::body_count)
     .def_readonly("articulation_count", &rex::sim::StepTrace::articulation_count)
     .def_readonly("broadphase_pair_count", &rex::sim::StepTrace::broadphase_pair_count)
     .def_readonly("manifold_count", &rex::sim::StepTrace::manifold_count)
     .def_readonly("solver", &rex::sim::StepTrace::solver)
+    .def_readonly("profile", &rex::sim::StepTrace::profile)
     .def_readonly("pipeline_summary", &rex::sim::StepTrace::pipeline_summary);
 
   py::enum_<rex::viewer::SnapshotShapeKind>(module, "SnapshotShapeKind")
@@ -265,6 +294,11 @@ PYBIND11_MODULE(rex_py, module) {
       py::arg("rotation") = rex::math::Quat{},
       py::arg("angular_velocity") = rex::math::Vec3{})
     .def("body", &PyWorld::body)
+    .def("set_translation", &PyWorld::set_translation)
+    .def("set_rotation", &PyWorld::set_rotation)
+    .def("set_pose", &PyWorld::set_pose)
+    .def("set_linear_velocity", &PyWorld::set_linear_velocity)
+    .def("set_angular_velocity", &PyWorld::set_angular_velocity)
     .def_property_readonly("body_count", &PyWorld::body_count)
     .def_property_readonly("contact_count", &PyWorld::contact_count);
 
