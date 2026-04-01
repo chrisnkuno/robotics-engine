@@ -892,6 +892,87 @@ void test_contact_solver_projects_dynamic_body_out_of_static_box() {
   expect(sphere.pose.translation.x > 0.6, "position projection should move the sphere away from the static box");
 }
 
+void test_position_projection_applies_rotational_correction_without_spin() {
+  rex::sim::EngineConfig config{};
+  config.simulation.gravity = {0.0, 0.0, 0.0};
+  config.simulation.step.dt = 0.0;
+  config.simulation.solver.position_correction_factor = 1.0;
+  config.simulation.solver.position_iterations = 4;
+  config.simulation.solver.velocity_iterations = 0;
+
+  rex::sim::Engine engine{config};
+  rex::dynamics::WorldState world{};
+  const std::size_t box_index = world.bodies.add_body({
+    .id = rex::platform::EntityId{.index = 1, .generation = 1},
+    .pose = rex::math::Transform{.translation = {0.0, 0.0, 0.0}},
+    .inverse_mass = 1.0,
+    .shape = rex::geometry::Shape{.data = rex::geometry::Box{.half_extents = {0.5, 0.5, 0.5}}},
+  });
+  const std::size_t sphere_index = world.bodies.add_body({
+    .id = rex::platform::EntityId{.index = 2, .generation = 1},
+    .pose = rex::math::Transform{.translation = {1.1, 0.0, 0.35}},
+    .inverse_mass = 0.0,
+    .shape = rex::geometry::Shape{.data = rex::geometry::Sphere{.radius = 0.7}},
+  });
+
+  (void)engine.step(world);
+
+  const rex::dynamics::BodyState box = world.bodies.state(box_index);
+  const double rotation_alignment = std::abs(box.pose.rotation.w);
+
+  expect(sphere_index == 1, "static sphere index should be stable");
+  expect(rotation_alignment < 1.0 - 1.0e-6, "off-center position correction should rotate the dynamic box");
+  expect_vec3_nearly_equal(
+    box.angular_velocity,
+    {0.0, 0.0, 0.0},
+    1.0e-9,
+    "position projection should not inject angular velocity");
+}
+
+void test_position_projection_reduces_refreshed_penetration() {
+  rex::sim::EngineConfig config{};
+  config.simulation.gravity = {0.0, 0.0, 0.0};
+  config.simulation.step.dt = 0.0;
+  config.simulation.solver.position_correction_factor = 0.8;
+  config.simulation.solver.position_iterations = 4;
+  config.simulation.solver.velocity_iterations = 0;
+
+  rex::dynamics::WorldState world{};
+  (void)world.bodies.add_body({
+    .id = rex::platform::EntityId{.index = 1, .generation = 1},
+    .pose = rex::math::Transform{.translation = {0.0, 0.0, 0.0}},
+    .inverse_mass = 1.0,
+    .shape = rex::geometry::Shape{.data = rex::geometry::Box{.half_extents = {0.5, 0.5, 0.5}}},
+  });
+  (void)world.bodies.add_body({
+    .id = rex::platform::EntityId{.index = 2, .generation = 1},
+    .pose = rex::math::Transform{.translation = {1.1, 0.0, 0.35}},
+    .inverse_mass = 0.0,
+    .shape = rex::geometry::Shape{.data = rex::geometry::Sphere{.radius = 0.7}},
+  });
+
+  const rex::collision::CollisionFrame initial_frame = rex::collision::build_frame(
+    rex::dynamics::build_collision_proxies(world.bodies),
+    {},
+    rex::collision::CollisionPipelineConfig{});
+  expect(initial_frame.manifolds.size() == 1, "test setup should begin with a contact manifold");
+  const double initial_penetration = initial_frame.manifolds[0].points[0].penetration;
+
+  rex::sim::Engine engine{config};
+  (void)engine.step(world);
+
+  const rex::collision::CollisionFrame refreshed_frame = rex::collision::build_frame(
+    rex::dynamics::build_collision_proxies(world.bodies),
+    {},
+    rex::collision::CollisionPipelineConfig{});
+  const double refreshed_penetration =
+    refreshed_frame.manifolds.empty() ? 0.0 : refreshed_frame.manifolds[0].points[0].penetration;
+
+  expect(
+    refreshed_penetration < initial_penetration,
+    "nonlinear position projection should reduce refreshed penetration");
+}
+
 void test_rotated_sphere_box_contact_matches_local_frame_geometry() {
   const rex::math::Quat box_rotation = rex::math::quat_from_axis_angle({0.0, 1.0, 0.0}, 0.5);
   const rex::math::Vec3 box_center{0.0, 0.0, 0.0};
@@ -1141,6 +1222,8 @@ int main() {
   test_off_center_normal_contact_generates_box_spin();
   test_frictional_contact_generates_sphere_spin();
   test_contact_solver_projects_dynamic_body_out_of_static_box();
+  test_position_projection_applies_rotational_correction_without_spin();
+  test_position_projection_reduces_refreshed_penetration();
   test_rotated_sphere_box_contact_matches_local_frame_geometry();
   test_rotated_box_box_contact_produces_unit_normal_and_positive_penetration();
   test_articulation_jacobian_matches_finite_difference();

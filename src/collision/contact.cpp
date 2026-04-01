@@ -617,6 +617,15 @@ void append_grid_memberships(
 
 }  // namespace
 
+auto build_contact_manifold(const BodyProxy& body_a, const BodyProxy& body_b)
+  -> std::optional<ContactManifold> {
+  if (body_b.id < body_a.id) {
+    return build_contact(body_b, body_a);
+  }
+
+  return build_contact(body_a, body_b);
+}
+
 auto build_frame(
   std::span<const BodyProxy> bodies,
   std::span<const ContactManifold> previous_manifolds,
@@ -637,7 +646,7 @@ auto build_frame(
   for (const CandidatePair& candidate : candidates) {
     frame.broadphase_pairs.push_back(candidate.pair);
 
-    auto maybe_manifold = build_contact(
+    auto maybe_manifold = build_contact_manifold(
       bodies[candidate.body_index_a],
       bodies[candidate.body_index_b]);
     if (!maybe_manifold.has_value()) {

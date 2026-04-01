@@ -1,6 +1,7 @@
 #include "rex/solver/solver.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <limits>
 #include <unordered_map>
@@ -29,6 +30,27 @@ struct BodyLookupPair {
   [[nodiscard]] auto valid() const noexcept -> bool {
     return body_a != std::numeric_limits<std::size_t>::max() &&
            body_b != std::numeric_limits<std::size_t>::max();
+  }
+};
+
+struct PreparedPoint {
+  rex::math::Vec3 position{};
+  rex::math::Vec3 normal{};
+  TangentBasis basis{};
+  rex::math::Vec3 lever_arm_a{};
+  rex::math::Vec3 lever_arm_b{};
+  double normal_mass{0.0};
+  double tangent_mass_u{0.0};
+  double tangent_mass_v{0.0};
+};
+
+struct PreparedManifold {
+  BodyLookupPair body_indices{};
+  std::array<PreparedPoint, rex::collision::ContactManifold::kMaxPoints> points{};
+  std::size_t point_count{0};
+
+  [[nodiscard]] auto valid() const noexcept -> bool {
+    return body_indices.valid();
   }
 };
 
@@ -71,7 +93,33 @@ struct BodyLookupPair {
   return lookup_pairs;
 }
 
+[[nodiscard]] auto lever_arm(
+  const rex::dynamics::BodyStorage& bodies,
+  std::size_t body_index,
+  const rex::math::Vec3& contact_position) -> rex::math::Vec3 {
+  return contact_position - bodies.pose(body_index).translation;
+}
+
 auto apply_impulse(
+  rex::dynamics::BodyStorage& bodies,
+  std::size_t body_index,
+  const rex::math::Vec3& lever_arm,
+  const rex::math::Vec3& impulse) -> void {
+  const double inverse_mass = bodies.inverse_mass(body_index);
+  if (inverse_mass <= 0.0) {
+    return;
+  }
+
+  bodies.linear_velocity_mut(body_index) += impulse * inverse_mass;
+  const rex::math::Vec3 angular_impulse = rex::math::cross(lever_arm, impulse);
+  bodies.angular_velocity_mut(body_index) += rex::geometry::apply_inverse_inertia(
+    bodies.shape(body_index),
+    bodies.pose(body_index).rotation,
+    inverse_mass,
+    angular_impulse);
+}
+
+auto apply_position_impulse(
   rex::dynamics::BodyStorage& bodies,
   std::size_t body_index,
   const rex::math::Vec3& contact_position,
@@ -81,32 +129,22 @@ auto apply_impulse(
     return;
   }
 
-  bodies.linear_velocity_mut(body_index) += impulse * inverse_mass;
-  const rex::math::Vec3 lever_arm = contact_position - bodies.pose(body_index).translation;
-  const rex::math::Vec3 angular_impulse = rex::math::cross(lever_arm, impulse);
-  bodies.angular_velocity_mut(body_index) += rex::geometry::apply_inverse_inertia(
+  auto& pose = bodies.pose_mut(body_index);
+  const rex::math::Vec3 current_lever_arm = contact_position - pose.translation;
+  const rex::math::Vec3 angular_impulse = rex::math::cross(current_lever_arm, impulse);
+  const rex::math::Vec3 angular_delta = rex::geometry::apply_inverse_inertia(
     bodies.shape(body_index),
-    bodies.pose(body_index).rotation,
+    pose.rotation,
     inverse_mass,
     angular_impulse);
-}
-
-auto apply_position_correction(
-  rex::dynamics::BodyStorage& bodies,
-  std::size_t body_index,
-  const rex::math::Vec3& delta) -> void {
-  if (bodies.inverse_mass(body_index) <= 0.0) {
-    return;
-  }
-
-  bodies.pose_mut(body_index).translation += delta;
+  pose.translation += impulse * inverse_mass;
+  pose.rotation = rex::math::integrate_rotation(pose.rotation, angular_delta, 1.0);
 }
 
 [[nodiscard]] auto point_velocity(
   const rex::dynamics::BodyStorage& bodies,
   std::size_t body_index,
-  const rex::math::Vec3& contact_position) -> rex::math::Vec3 {
-  const rex::math::Vec3 lever_arm = contact_position - bodies.pose(body_index).translation;
+  const rex::math::Vec3& lever_arm) -> rex::math::Vec3 {
   return bodies.linear_velocity(body_index) +
          rex::math::cross(bodies.angular_velocity(body_index), lever_arm);
 }
@@ -115,22 +153,22 @@ auto apply_position_correction(
   const rex::dynamics::BodyStorage& bodies,
   std::size_t body_index_a,
   std::size_t body_index_b,
-  const rex::math::Vec3& contact_position) -> rex::math::Vec3 {
-  return point_velocity(bodies, body_index_b, contact_position) -
-         point_velocity(bodies, body_index_a, contact_position);
+  const rex::math::Vec3& lever_arm_a,
+  const rex::math::Vec3& lever_arm_b) -> rex::math::Vec3 {
+  return point_velocity(bodies, body_index_b, lever_arm_b) -
+         point_velocity(bodies, body_index_a, lever_arm_a);
 }
 
 [[nodiscard]] auto impulse_denominator(
   const rex::dynamics::BodyStorage& bodies,
   std::size_t body_index,
-  const rex::math::Vec3& contact_position,
+  const rex::math::Vec3& lever_arm,
   const rex::math::Vec3& direction) -> double {
   const double inverse_mass = bodies.inverse_mass(body_index);
   if (inverse_mass <= 0.0) {
     return 0.0;
   }
 
-  const rex::math::Vec3 lever_arm = contact_position - bodies.pose(body_index).translation;
   const rex::math::Vec3 angular_axis = rex::math::cross(lever_arm, direction);
   const rex::math::Vec3 world_inverse_inertia_axis = rex::geometry::apply_inverse_inertia(
     bodies.shape(body_index),
@@ -141,6 +179,106 @@ auto apply_position_correction(
          rex::math::dot(
            rex::math::cross(world_inverse_inertia_axis, lever_arm),
            direction);
+}
+
+[[nodiscard]] auto build_prepared_manifolds(
+  const rex::dynamics::BodyStorage& bodies,
+  std::span<const rex::collision::ContactManifold> manifolds,
+  std::span<const BodyLookupPair> manifold_body_lookup) -> std::vector<PreparedManifold> {
+  std::vector<PreparedManifold> prepared(manifolds.size());
+  for (std::size_t manifold_index = 0; manifold_index < manifolds.size(); ++manifold_index) {
+    PreparedManifold& prepared_manifold = prepared[manifold_index];
+    prepared_manifold.body_indices = manifold_body_lookup[manifold_index];
+    prepared_manifold.point_count = manifolds[manifold_index].point_count;
+    if (!prepared_manifold.valid()) {
+      continue;
+    }
+
+    for (std::size_t point_index = 0; point_index < prepared_manifold.point_count; ++point_index) {
+      const rex::collision::ContactPoint& point = manifolds[manifold_index].points[point_index];
+      PreparedPoint& prepared_point = prepared_manifold.points[point_index];
+      prepared_point.position = point.position;
+      prepared_point.normal = rex::math::normalized_or(point.normal);
+      prepared_point.basis = tangent_basis(prepared_point.normal);
+      prepared_point.lever_arm_a =
+        lever_arm(bodies, prepared_manifold.body_indices.body_a, point.position);
+      prepared_point.lever_arm_b =
+        lever_arm(bodies, prepared_manifold.body_indices.body_b, point.position);
+      prepared_point.normal_mass =
+        impulse_denominator(
+          bodies,
+          prepared_manifold.body_indices.body_a,
+          prepared_point.lever_arm_a,
+          prepared_point.normal) +
+        impulse_denominator(
+          bodies,
+          prepared_manifold.body_indices.body_b,
+          prepared_point.lever_arm_b,
+          prepared_point.normal);
+      prepared_point.tangent_mass_u =
+        impulse_denominator(
+          bodies,
+          prepared_manifold.body_indices.body_a,
+          prepared_point.lever_arm_a,
+          prepared_point.basis.u) +
+        impulse_denominator(
+          bodies,
+          prepared_manifold.body_indices.body_b,
+          prepared_point.lever_arm_b,
+          prepared_point.basis.u);
+      prepared_point.tangent_mass_v =
+        impulse_denominator(
+          bodies,
+          prepared_manifold.body_indices.body_a,
+          prepared_point.lever_arm_a,
+          prepared_point.basis.v) +
+        impulse_denominator(
+          bodies,
+          prepared_manifold.body_indices.body_b,
+          prepared_point.lever_arm_b,
+          prepared_point.basis.v);
+    }
+  }
+
+  return prepared;
+}
+
+[[nodiscard]] auto body_proxy(const rex::dynamics::BodyStorage& bodies, std::size_t body_index)
+  -> rex::collision::BodyProxy {
+  return {
+    .id = bodies.id(body_index),
+    .pose = bodies.pose(body_index),
+    .shape = bodies.shape(body_index),
+  };
+}
+
+void refresh_manifold_geometry(
+  rex::dynamics::BodyStorage& bodies,
+  BodyLookupPair body_indices,
+  rex::collision::ContactManifold& manifold) {
+  if (!body_indices.valid()) {
+    return;
+  }
+
+  auto refreshed = rex::collision::build_contact_manifold(
+    body_proxy(bodies, body_indices.body_a),
+    body_proxy(bodies, body_indices.body_b));
+  if (!refreshed.has_value()) {
+    manifold.point_count = 0;
+    return;
+  }
+
+  const std::size_t persistent_points = std::min(manifold.point_count, refreshed->point_count);
+  for (std::size_t point_index = 0; point_index < persistent_points; ++point_index) {
+    refreshed->points[point_index].cached_normal_impulse =
+      manifold.points[point_index].cached_normal_impulse;
+    refreshed->points[point_index].cached_tangent_impulse_u =
+      manifold.points[point_index].cached_tangent_impulse_u;
+    refreshed->points[point_index].cached_tangent_impulse_v =
+      manifold.points[point_index].cached_tangent_impulse_v;
+  }
+
+  manifold = *refreshed;
 }
 
 }  // namespace
@@ -208,23 +346,26 @@ auto solve_contacts(
   const auto body_lookup = build_body_lookup(bodies);
   const std::vector<BodyLookupPair> manifold_body_lookup =
     build_manifold_body_lookup(body_lookup, manifolds);
+  const std::vector<PreparedManifold> prepared_manifolds =
+    build_prepared_manifolds(bodies, manifolds, manifold_body_lookup);
   std::vector<std::vector<double>> restitution_targets(manifolds.size());
   for (std::size_t manifold_index = 0; manifold_index < manifolds.size(); ++manifold_index) {
     const auto& manifold = manifolds[manifold_index];
     restitution_targets[manifold_index].resize(manifold.point_count, 0.0);
-    const BodyLookupPair body_indices = manifold_body_lookup[manifold_index];
-    if (!body_indices.valid()) {
+    const PreparedManifold& prepared_manifold = prepared_manifolds[manifold_index];
+    if (!prepared_manifold.valid()) {
       continue;
     }
 
     for (std::size_t point_index = 0; point_index < manifold.point_count; ++point_index) {
-      const rex::math::Vec3 normal = rex::math::normalized_or(manifold.points[point_index].normal);
       const rex::math::Vec3 relative_velocity = relative_point_velocity(
         bodies,
-        body_indices.body_a,
-        body_indices.body_b,
-        manifold.points[point_index].position);
-      const double normal_velocity = rex::math::dot(relative_velocity, normal);
+        prepared_manifold.body_indices.body_a,
+        prepared_manifold.body_indices.body_b,
+        prepared_manifold.points[point_index].lever_arm_a,
+        prepared_manifold.points[point_index].lever_arm_b);
+      const double normal_velocity =
+        rex::math::dot(relative_velocity, prepared_manifold.points[point_index].normal);
       restitution_targets[manifold_index][point_index] =
         normal_velocity < 0.0 ? config.restitution * (-normal_velocity) : 0.0;
     }
@@ -233,14 +374,13 @@ auto solve_contacts(
   if (config.warm_start) {
     for (std::size_t manifold_index = 0; manifold_index < manifolds.size(); ++manifold_index) {
       auto& manifold = manifolds[manifold_index];
-      const BodyLookupPair body_indices = manifold_body_lookup[manifold_index];
-      if (!body_indices.valid()) {
+      const PreparedManifold& prepared_manifold = prepared_manifolds[manifold_index];
+      if (!prepared_manifold.valid()) {
         continue;
       }
 
       for (std::size_t point_index = 0; point_index < manifold.point_count; ++point_index) {
-        const rex::math::Vec3 normal = rex::math::normalized_or(manifold.points[point_index].normal);
-        const TangentBasis basis = tangent_basis(normal);
+        const PreparedPoint& prepared_point = prepared_manifold.points[point_index];
         const double cached_normal_impulse = manifold.points[point_index].cached_normal_impulse;
         const double cached_tangent_impulse_u =
           config.friction_coefficient > 0.0 ? manifold.points[point_index].cached_tangent_impulse_u : 0.0;
@@ -251,19 +391,19 @@ auto solve_contacts(
         }
 
         const rex::math::Vec3 total_impulse =
-          (normal * cached_normal_impulse) +
-          (basis.u * cached_tangent_impulse_u) +
-          (basis.v * cached_tangent_impulse_v);
+          (prepared_point.normal * cached_normal_impulse) +
+          (prepared_point.basis.u * cached_tangent_impulse_u) +
+          (prepared_point.basis.v * cached_tangent_impulse_v);
 
         apply_impulse(
           bodies,
-          body_indices.body_a,
-          manifold.points[point_index].position,
+          prepared_manifold.body_indices.body_a,
+          prepared_point.lever_arm_a,
           total_impulse * -1.0);
         apply_impulse(
           bodies,
-          body_indices.body_b,
-          manifold.points[point_index].position,
+          prepared_manifold.body_indices.body_b,
+          prepared_point.lever_arm_b,
           total_impulse);
       }
     }
@@ -280,28 +420,25 @@ auto solve_contacts(
   for (std::size_t iteration = 0; iteration < config.velocity_iterations; ++iteration) {
     for (std::size_t manifold_index = 0; manifold_index < manifolds.size(); ++manifold_index) {
       auto& manifold = manifolds[manifold_index];
-      const BodyLookupPair body_indices = manifold_body_lookup[manifold_index];
-      if (!body_indices.valid()) {
+      const PreparedManifold& prepared_manifold = prepared_manifolds[manifold_index];
+      if (!prepared_manifold.valid()) {
         continue;
       }
 
       for (std::size_t point_index = 0; point_index < manifold.point_count; ++point_index) {
         auto& point = manifold.points[point_index];
-        const rex::math::Vec3 normal = rex::math::normalized_or(point.normal);
-        const TangentBasis basis = tangent_basis(normal);
-        const double normal_mass =
-          impulse_denominator(bodies, body_indices.body_a, point.position, normal) +
-          impulse_denominator(bodies, body_indices.body_b, point.position, normal);
-        if (normal_mass <= 0.0) {
+        const PreparedPoint& prepared_point = prepared_manifold.points[point_index];
+        if (prepared_point.normal_mass <= 0.0) {
           continue;
         }
 
         const rex::math::Vec3 relative_velocity = relative_point_velocity(
           bodies,
-          body_indices.body_a,
-          body_indices.body_b,
-          point.position);
-        const double normal_velocity = rex::math::dot(relative_velocity, normal);
+          prepared_manifold.body_indices.body_a,
+          prepared_manifold.body_indices.body_b,
+          prepared_point.lever_arm_a,
+          prepared_point.lever_arm_b);
+        const double normal_velocity = rex::math::dot(relative_velocity, prepared_point.normal);
         const double restitution_velocity = restitution_targets[manifold_index][point_index];
         const double positional_error = std::max(point.penetration - config.penetration_slop, 0.0);
         const double bias =
@@ -309,7 +446,7 @@ auto solve_contacts(
         const double desired_normal_velocity = std::max(restitution_velocity, bias);
 
         const double incremental_impulse =
-          (desired_normal_velocity - normal_velocity) / normal_mass;
+          (desired_normal_velocity - normal_velocity) / prepared_point.normal_mass;
         const double previous_impulse = point.cached_normal_impulse;
         const double next_impulse = std::max(previous_impulse + incremental_impulse, 0.0);
         const double applied_impulse = next_impulse - previous_impulse;
@@ -319,8 +456,16 @@ auto solve_contacts(
           continue;
         }
 
-        apply_impulse(bodies, body_indices.body_a, point.position, normal * -applied_impulse);
-        apply_impulse(bodies, body_indices.body_b, point.position, normal * applied_impulse);
+        apply_impulse(
+          bodies,
+          prepared_manifold.body_indices.body_a,
+          prepared_point.lever_arm_a,
+          prepared_point.normal * -applied_impulse);
+        apply_impulse(
+          bodies,
+          prepared_manifold.body_indices.body_b,
+          prepared_point.lever_arm_b,
+          prepared_point.normal * applied_impulse);
 
         const double friction_limit = config.friction_coefficient * point.cached_normal_impulse;
         if (friction_limit <= 0.0) {
@@ -329,19 +474,17 @@ auto solve_contacts(
           continue;
         }
 
-        const auto solve_tangent = [&](const rex::math::Vec3& tangent, double& cached_impulse) {
-          const double tangent_mass =
-            impulse_denominator(bodies, body_indices.body_a, point.position, tangent) +
-            impulse_denominator(bodies, body_indices.body_b, point.position, tangent);
+        const auto solve_tangent = [&](const rex::math::Vec3& tangent, double tangent_mass, double& cached_impulse) {
           if (tangent_mass <= 0.0) {
             return;
           }
 
           const rex::math::Vec3 tangent_relative_velocity = relative_point_velocity(
             bodies,
-            body_indices.body_a,
-            body_indices.body_b,
-            point.position);
+            prepared_manifold.body_indices.body_a,
+            prepared_manifold.body_indices.body_b,
+            prepared_point.lever_arm_a,
+            prepared_point.lever_arm_b);
           const double tangent_velocity = rex::math::dot(tangent_relative_velocity, tangent);
           const double tangent_increment = -tangent_velocity / tangent_mass;
           const double previous_tangent_impulse = cached_impulse;
@@ -357,34 +500,38 @@ auto solve_contacts(
 
           apply_impulse(
             bodies,
-            body_indices.body_a,
-            point.position,
+            prepared_manifold.body_indices.body_a,
+            prepared_point.lever_arm_a,
             tangent * -applied_tangent_impulse);
           apply_impulse(
             bodies,
-            body_indices.body_b,
-            point.position,
+            prepared_manifold.body_indices.body_b,
+            prepared_point.lever_arm_b,
             tangent * applied_tangent_impulse);
         };
 
-        solve_tangent(basis.u, point.cached_tangent_impulse_u);
-        solve_tangent(basis.v, point.cached_tangent_impulse_v);
+        solve_tangent(
+          prepared_point.basis.u,
+          prepared_point.tangent_mass_u,
+          point.cached_tangent_impulse_u);
+        solve_tangent(
+          prepared_point.basis.v,
+          prepared_point.tangent_mass_v,
+          point.cached_tangent_impulse_v);
       }
     }
   }
 
   for (std::size_t iteration = 0; iteration < config.position_iterations; ++iteration) {
     for (std::size_t manifold_index = 0; manifold_index < manifolds.size(); ++manifold_index) {
-      const auto& manifold = manifolds[manifold_index];
+      auto& manifold = manifolds[manifold_index];
       const BodyLookupPair body_indices = manifold_body_lookup[manifold_index];
       if (!body_indices.valid()) {
         continue;
       }
 
-      const double inverse_mass_a = bodies.inverse_mass(body_indices.body_a);
-      const double inverse_mass_b = bodies.inverse_mass(body_indices.body_b);
-      const double inverse_mass_sum = inverse_mass_a + inverse_mass_b;
-      if (inverse_mass_sum <= 0.0) {
+      refresh_manifold_geometry(bodies, body_indices, manifold);
+      if (manifold.point_count == 0) {
         continue;
       }
 
@@ -396,10 +543,20 @@ auto solve_contacts(
         }
 
         const rex::math::Vec3 normal = rex::math::normalized_or(point.normal);
-        const rex::math::Vec3 correction =
-          normal * (config.position_correction_factor * penetration / inverse_mass_sum);
-        apply_position_correction(bodies, body_indices.body_a, correction * -inverse_mass_a);
-        apply_position_correction(bodies, body_indices.body_b, correction * inverse_mass_b);
+        const rex::math::Vec3 lever_arm_a = lever_arm(bodies, body_indices.body_a, point.position);
+        const rex::math::Vec3 lever_arm_b = lever_arm(bodies, body_indices.body_b, point.position);
+        const double position_mass =
+          impulse_denominator(bodies, body_indices.body_a, lever_arm_a, normal) +
+          impulse_denominator(bodies, body_indices.body_b, lever_arm_b, normal);
+        if (position_mass <= 0.0) {
+          continue;
+        }
+
+        const double impulse_magnitude =
+          config.position_correction_factor * penetration / position_mass;
+        const rex::math::Vec3 impulse = normal * impulse_magnitude;
+        apply_position_impulse(bodies, body_indices.body_a, point.position, impulse * -1.0);
+        apply_position_impulse(bodies, body_indices.body_b, point.position, impulse);
       }
     }
   }

@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstddef>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -54,5 +55,7 @@ struct CollisionFrame {
   std::span<const BodyProxy> bodies,
   std::span<const ContactManifold> previous_manifolds,
   const CollisionPipelineConfig& config) -> CollisionFrame;
+[[nodiscard]] auto build_contact_manifold(const BodyProxy& body_a, const BodyProxy& body_b)
+  -> std::optional<ContactManifold>;
 
 }  // namespace rex::collision
