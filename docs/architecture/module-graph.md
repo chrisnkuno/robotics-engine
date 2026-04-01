@@ -75,6 +75,7 @@ The first implementation should optimize for robustness and determinism, not for
 - integration: semi-implicit Euler
 - articulated dynamics: Featherstone-style articulated-body forward dynamics on CPU
 - contact representation: persistent contact manifolds with up to 4 points per pair
+- broadphase: deterministic sweep-and-prune on the x-axis using bounding volumes
 - friction model: 2 tangent directions per point using a friction pyramid
 - solver: warm-started sequential impulse / projected Gauss-Seidel at the velocity level
 - stabilization: split impulse for penetration correction, with a small Baumgarte bias reserved for joints
@@ -119,4 +120,3 @@ The interface rule is simple: GPU kernels operate on packed arrays owned by `dyn
 3. Replace the solver stub with real row assembly and warm-start caches.
 4. Add a Python binding that returns batched observations and step traces.
 5. Introduce a CUDA backend for one hot path only after CPU parity tests exist.
-

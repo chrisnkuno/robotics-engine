@@ -8,6 +8,7 @@ The current repo deliberately starts small:
 - module boundaries that match the engine architecture
 - a concrete first-pass solver/contact design in [docs/architecture/module-graph.md](/home/chris/robotics-engine/docs/architecture/module-graph.md)
 - a smoke test that exercises the public stepping surface
+- a native replay viewer scaffold that exports SVG debug frames
 
 ## Build
 
@@ -15,6 +16,25 @@ The current repo deliberately starts small:
 cmake -S . -B build
 cmake --build build
 ctest --test-dir build
+```
+
+## Visualize A Demo
+
+After building, you can generate a demo replay and SVG frames with:
+
+```bash
+./build/rex_viewer_app --demo build/viewer-demo
+```
+
+That writes:
+
+- `build/viewer-demo/demo.rex`: replay capture
+- `build/viewer-demo/frame-*.svg`: debug-rendered frames you can open directly
+
+You can also export SVGs from an existing replay:
+
+```bash
+./build/rex_viewer_app path/to/run.rex build/viewer-export
 ```
 
 ## Optional Features
@@ -27,5 +47,5 @@ ctest --test-dir build
 - `include/rex`: public module interfaces
 - `src`: minimal implementations and backend stubs
 - `docs/architecture`: module graph and solver/contact decisions
+- `apps`: native tools such as the replay viewer scaffold
 - `tests`: smoke coverage for the initial stepping API
-

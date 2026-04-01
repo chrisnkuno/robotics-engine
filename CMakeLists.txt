@@ -62,6 +62,10 @@ add_library(rex_sim STATIC src/sim/engine.cpp)
 rex_configure_target(rex_sim)
 target_link_libraries(rex_sim PUBLIC rex_dynamics rex_solver)
 
+add_library(rex_viewer STATIC src/viewer/demo.cpp src/viewer/replay.cpp src/viewer/svg_renderer.cpp)
+rex_configure_target(rex_viewer)
+target_link_libraries(rex_viewer PUBLIC rex_sim)
+
 add_library(rex_engine INTERFACE)
 target_link_libraries(
   rex_engine
@@ -73,7 +77,12 @@ target_link_libraries(
     rex_math
     rex_platform
     rex_sim
-    rex_solver)
+    rex_solver
+    rex_viewer)
+
+add_executable(rex_viewer_app apps/rex_viewer_main.cpp)
+rex_configure_target(rex_viewer_app)
+target_link_libraries(rex_viewer_app PRIVATE rex_engine)
 
 if(REX_ENABLE_CUDA)
   include(CheckLanguage)
@@ -108,4 +117,9 @@ if(BUILD_TESTING AND REX_ENABLE_TESTS)
   rex_configure_target(rex_core_tests)
   target_link_libraries(rex_core_tests PRIVATE rex_engine)
   add_test(NAME rex_core_tests COMMAND rex_core_tests)
+
+  add_executable(rex_viewer_tests tests/viewer_test.cpp)
+  rex_configure_target(rex_viewer_tests)
+  target_link_libraries(rex_viewer_tests PRIVATE rex_engine)
+  add_test(NAME rex_viewer_tests COMMAND rex_viewer_tests)
 endif()

@@ -41,6 +41,23 @@ auto make_sphere_body(
   };
 }
 
+auto make_box_body(
+  std::uint32_t index,
+  const rex::math::Vec3& translation,
+  const rex::math::Vec3& half_extents,
+  double inverse_mass = 1.0) -> rex::dynamics::BodyState {
+  return {
+    .id = rex::platform::EntityId{.index = index, .generation = 1},
+    .pose = rex::math::Transform{
+      .translation = translation,
+    },
+    .inverse_mass = inverse_mass,
+    .shape = rex::geometry::Shape{
+      .data = rex::geometry::Box{.half_extents = half_extents},
+    },
+  };
+}
+
 void test_body_storage_round_trip() {
   rex::dynamics::BodyStorage bodies{};
   bodies.reserve(2);
@@ -78,6 +95,86 @@ void test_broadphase_is_stable_and_sorted() {
   expect(frame.broadphase_pairs.size() == 1, "only one pair should overlap in broadphase");
   expect(frame.broadphase_pairs[0].body_a.index == 2, "lower entity id should be first");
   expect(frame.broadphase_pairs[0].body_b.index == 7, "higher entity id should be second");
+}
+
+void test_broadphase_reports_multiple_pairs_in_sorted_order() {
+  const std::vector<rex::collision::BodyProxy> bodies = {
+    {.id = rex::platform::EntityId{.index = 10, .generation = 1},
+     .pose = rex::math::Transform{.translation = {0.0, 0.0, 0.0}},
+     .shape = rex::geometry::Shape{.data = rex::geometry::Sphere{.radius = 1.0}}},
+    {.id = rex::platform::EntityId{.index = 5, .generation = 1},
+     .pose = rex::math::Transform{.translation = {1.0, 0.0, 0.0}},
+     .shape = rex::geometry::Shape{.data = rex::geometry::Sphere{.radius = 1.0}}},
+    {.id = rex::platform::EntityId{.index = 8, .generation = 1},
+     .pose = rex::math::Transform{.translation = {1.9, 0.0, 0.0}},
+     .shape = rex::geometry::Shape{.data = rex::geometry::Sphere{.radius = 1.0}}},
+  };
+
+  const rex::collision::CollisionFrame frame =
+    rex::collision::build_frame(bodies, {}, rex::collision::CollisionPipelineConfig{});
+
+  expect(frame.broadphase_pairs.size() == 3, "three mutually overlapping spheres should produce three pairs");
+  expect(frame.broadphase_pairs[0].body_a.index == 5, "first pair should start with the lowest id");
+  expect(frame.broadphase_pairs[0].body_b.index == 8, "first pair should be sorted by id");
+  expect(frame.broadphase_pairs[1].body_a.index == 5, "second pair should preserve sorted order");
+  expect(frame.broadphase_pairs[1].body_b.index == 10, "second pair should preserve sorted order");
+  expect(frame.broadphase_pairs[2].body_a.index == 8, "third pair should preserve sorted order");
+  expect(frame.broadphase_pairs[2].body_b.index == 10, "third pair should preserve sorted order");
+}
+
+void test_broadphase_is_input_order_invariant() {
+  const std::vector<rex::collision::BodyProxy> first_order = {
+    {.id = rex::platform::EntityId{.index = 10, .generation = 1},
+     .pose = rex::math::Transform{.translation = {0.0, 0.0, 0.0}},
+     .shape = rex::geometry::Shape{.data = rex::geometry::Sphere{.radius = 1.0}}},
+    {.id = rex::platform::EntityId{.index = 5, .generation = 1},
+     .pose = rex::math::Transform{.translation = {1.0, 0.0, 0.0}},
+     .shape = rex::geometry::Shape{.data = rex::geometry::Sphere{.radius = 1.0}}},
+    {.id = rex::platform::EntityId{.index = 8, .generation = 1},
+     .pose = rex::math::Transform{.translation = {1.9, 0.0, 0.0}},
+     .shape = rex::geometry::Shape{.data = rex::geometry::Sphere{.radius = 1.0}}},
+  };
+  const std::vector<rex::collision::BodyProxy> second_order = {
+    {.id = rex::platform::EntityId{.index = 8, .generation = 1},
+     .pose = rex::math::Transform{.translation = {1.9, 0.0, 0.0}},
+     .shape = rex::geometry::Shape{.data = rex::geometry::Sphere{.radius = 1.0}}},
+    {.id = rex::platform::EntityId{.index = 10, .generation = 1},
+     .pose = rex::math::Transform{.translation = {0.0, 0.0, 0.0}},
+     .shape = rex::geometry::Shape{.data = rex::geometry::Sphere{.radius = 1.0}}},
+    {.id = rex::platform::EntityId{.index = 5, .generation = 1},
+     .pose = rex::math::Transform{.translation = {1.0, 0.0, 0.0}},
+     .shape = rex::geometry::Shape{.data = rex::geometry::Sphere{.radius = 1.0}}},
+  };
+
+  const rex::collision::CollisionFrame first_frame =
+    rex::collision::build_frame(first_order, {}, rex::collision::CollisionPipelineConfig{});
+  const rex::collision::CollisionFrame second_frame =
+    rex::collision::build_frame(second_order, {}, rex::collision::CollisionPipelineConfig{});
+
+  expect(
+    first_frame.broadphase_pairs.size() == second_frame.broadphase_pairs.size(),
+    "pair count should not depend on input order");
+  expect(
+    first_frame.manifolds.size() == second_frame.manifolds.size(),
+    "manifold count should not depend on input order");
+
+  for (std::size_t pair_index = 0; pair_index < first_frame.broadphase_pairs.size(); ++pair_index) {
+    expect(
+      first_frame.broadphase_pairs[pair_index].body_a == second_frame.broadphase_pairs[pair_index].body_a,
+      "pair ordering should be deterministic across input permutations");
+    expect(
+      first_frame.broadphase_pairs[pair_index].body_b == second_frame.broadphase_pairs[pair_index].body_b,
+      "pair ordering should be deterministic across input permutations");
+  }
+
+  for (std::size_t manifold_index = 0; manifold_index < first_frame.manifolds.size(); ++manifold_index) {
+    expect(
+      first_frame.manifolds[manifold_index].body_a == second_frame.manifolds[manifold_index].body_a,
+      "manifold ordering should be deterministic across input permutations");
+    expect(
+      first_frame.manifolds[manifold_index].body_b == second_frame.manifolds[manifold_index].body_b,
+      "manifold ordering should be deterministic across input permutations");
+  }
 }
 
 void test_persistent_manifold_keeps_cached_impulse() {
@@ -133,6 +230,44 @@ void test_nonpersistent_manifold_drops_cached_impulse() {
   expect(
     nearly_equal(frame.manifolds[0].points[0].cached_normal_impulse, 0.0),
     "disabling persistence should clear cached impulse reuse");
+}
+
+void test_sphere_box_contact_generation() {
+  const std::vector<rex::collision::BodyProxy> bodies = {
+    {.id = rex::platform::EntityId{.index = 4, .generation = 1},
+     .pose = rex::math::Transform{.translation = {1.2, 0.0, 0.0}},
+     .shape = rex::geometry::Shape{.data = rex::geometry::Sphere{.radius = 0.8}}},
+    {.id = rex::platform::EntityId{.index = 9, .generation = 1},
+     .pose = rex::math::Transform{.translation = {0.0, 0.0, 0.0}},
+     .shape = rex::geometry::Shape{.data = rex::geometry::Box{.half_extents = {0.5, 0.5, 0.5}}}},
+  };
+
+  const rex::collision::CollisionFrame frame =
+    rex::collision::build_frame(bodies, {}, rex::collision::CollisionPipelineConfig{});
+
+  expect(frame.manifolds.size() == 1, "sphere-box overlap should create one manifold");
+  expect(frame.manifolds[0].body_a.index == 4, "sphere-box manifold should preserve sorted pair order");
+  expect(frame.manifolds[0].body_b.index == 9, "sphere-box manifold should preserve sorted pair order");
+  expect(frame.manifolds[0].points[0].normal.x < 0.0, "sphere-to-box normal should point toward the box");
+  expect(nearly_equal(frame.manifolds[0].points[0].penetration, 0.1), "sphere-box penetration should match geometry");
+}
+
+void test_box_box_contact_generation() {
+  const std::vector<rex::collision::BodyProxy> bodies = {
+    {.id = rex::platform::EntityId{.index = 3, .generation = 1},
+     .pose = rex::math::Transform{.translation = {0.0, 0.0, 0.0}},
+     .shape = rex::geometry::Shape{.data = rex::geometry::Box{.half_extents = {0.5, 0.5, 0.5}}}},
+    {.id = rex::platform::EntityId{.index = 6, .generation = 1},
+     .pose = rex::math::Transform{.translation = {0.8, 0.0, 0.0}},
+     .shape = rex::geometry::Shape{.data = rex::geometry::Box{.half_extents = {0.5, 0.5, 0.5}}}},
+  };
+
+  const rex::collision::CollisionFrame frame =
+    rex::collision::build_frame(bodies, {}, rex::collision::CollisionPipelineConfig{});
+
+  expect(frame.manifolds.size() == 1, "box-box overlap should create one manifold");
+  expect(frame.manifolds[0].points[0].normal.x > 0.0, "box-box normal should point from the first box to the second");
+  expect(nearly_equal(frame.manifolds[0].points[0].penetration, 0.2), "box-box penetration should match overlap");
 }
 
 void test_engine_step_integrates_gravity() {
@@ -215,17 +350,69 @@ void test_engine_step_builds_contacts_and_solver_counts() {
   expect(world.contact_manifolds[0].point_count == 1, "sphere-sphere narrowphase should emit one point");
 }
 
+void test_engine_step_builds_multiple_contacts() {
+  rex::sim::EngineConfig config{};
+  config.simulation.gravity = {0.0, 0.0, 0.0};
+
+  rex::sim::Engine engine{config};
+  rex::dynamics::WorldState world{};
+  const std::size_t first_body =
+    world.bodies.add_body(make_sphere_body(10, rex::math::Vec3{0.0, 0.0, 0.0}, 1.0, 1.0));
+  const std::size_t second_body =
+    world.bodies.add_body(make_sphere_body(5, rex::math::Vec3{1.0, 0.0, 0.0}, 1.0, 1.0));
+  const std::size_t third_body =
+    world.bodies.add_body(make_sphere_body(8, rex::math::Vec3{1.9, 0.0, 0.0}, 1.0, 1.0));
+
+  const rex::sim::StepTrace trace = engine.step(world);
+
+  expect(first_body == 0, "first body index should be stable");
+  expect(second_body == 1, "second body index should be stable");
+  expect(third_body == 2, "third body index should be stable");
+  expect(trace.broadphase_pair_count == 3, "three overlapping spheres should produce three broadphase pairs");
+  expect(trace.manifold_count == 3, "three overlapping spheres should produce three manifolds");
+  expect(trace.solver.contact_count == 3, "three manifolds should produce three contacts");
+  expect(trace.solver.constraint_count == 9, "three contacts should assemble nine solver rows");
+}
+
+void test_engine_step_builds_mixed_shape_contacts() {
+  rex::sim::EngineConfig config{};
+  config.simulation.gravity = {0.0, 0.0, 0.0};
+
+  rex::sim::Engine engine{config};
+  rex::dynamics::WorldState world{};
+  const std::size_t box_index =
+    world.bodies.add_body(make_box_body(9, rex::math::Vec3{0.0, 0.0, 0.0}, rex::math::Vec3{0.5, 0.5, 0.5}));
+  const std::size_t sphere_index =
+    world.bodies.add_body(make_sphere_body(4, rex::math::Vec3{1.2, 0.0, 0.0}, 0.8, 1.0));
+
+  const rex::sim::StepTrace trace = engine.step(world);
+
+  expect(box_index == 0, "box body index should be stable");
+  expect(sphere_index == 1, "sphere body index should be stable");
+  expect(trace.broadphase_pair_count == 1, "mixed overlap should create one broadphase pair");
+  expect(trace.manifold_count == 1, "mixed overlap should create one manifold");
+  expect(trace.solver.contact_count == 1, "mixed overlap should produce one contact");
+  expect(trace.solver.constraint_count == 3, "mixed overlap should assemble three solver rows");
+  expect(world.contact_manifolds[0].points[0].penetration > 0.0, "mixed overlap should keep penetration data");
+}
+
 }  // namespace
 
 int main() {
   test_body_storage_round_trip();
   test_broadphase_is_stable_and_sorted();
+  test_broadphase_reports_multiple_pairs_in_sorted_order();
+  test_broadphase_is_input_order_invariant();
   test_persistent_manifold_keeps_cached_impulse();
   test_nonpersistent_manifold_drops_cached_impulse();
+  test_sphere_box_contact_generation();
+  test_box_box_contact_generation();
   test_engine_step_integrates_gravity();
   test_solver_assembles_contact_rows();
   test_static_body_does_not_integrate();
   test_engine_step_builds_contacts_and_solver_counts();
+  test_engine_step_builds_multiple_contacts();
+  test_engine_step_builds_mixed_shape_contacts();
   std::cout << "all core tests passed\n";
   return 0;
 }
