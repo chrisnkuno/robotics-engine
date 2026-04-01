@@ -20,5 +20,6 @@ struct Shape {
   ShapeData data{Sphere{}};
 };
 
-}  // namespace rex::geometry
+[[nodiscard]] auto bounding_radius(const Shape& shape) -> double;
 
+}  // namespace rex::geometry

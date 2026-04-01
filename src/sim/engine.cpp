@@ -12,6 +12,15 @@ auto Engine::config() const noexcept -> const EngineConfig& {
 }
 
 auto Engine::step(rex::dynamics::WorldState& world) const -> StepTrace {
+  rex::dynamics::integrate_unconstrained(world.bodies, config_.simulation);
+
+  const auto collision_proxies = rex::dynamics::build_collision_proxies(world.bodies);
+  const rex::collision::CollisionFrame collision_frame = rex::collision::build_frame(
+    collision_proxies,
+    world.contact_manifolds,
+    config_.simulation.collision);
+  world.contact_manifolds = collision_frame.manifolds;
+
   const std::size_t body_count = world.bodies.size();
   const std::size_t articulation_count = world.articulations.size();
   const std::size_t contact_count = std::transform_reduce(
@@ -20,10 +29,12 @@ auto Engine::step(rex::dynamics::WorldState& world) const -> StepTrace {
     std::size_t{0},
     std::plus<>{},
     [](const rex::collision::ContactManifold& manifold) { return manifold.point_count; });
+  const rex::solver::ConstraintAssembly constraint_assembly =
+    rex::solver::assemble_contact_rows(world.contact_manifolds);
 
   rex::solver::SolverResult solver_result{};
   solver_result.contact_count = contact_count;
-  solver_result.constraint_count = contact_count * 3;
+  solver_result.constraint_count = constraint_assembly.rows.size();
 
   for (const auto& manifold : world.contact_manifolds) {
     for (std::size_t point_index = 0; point_index < manifold.point_count; ++point_index) {
@@ -35,9 +46,11 @@ auto Engine::step(rex::dynamics::WorldState& world) const -> StepTrace {
   StepTrace trace{};
   trace.body_count = body_count;
   trace.articulation_count = articulation_count;
+  trace.broadphase_pair_count = collision_frame.broadphase_pairs.size();
+  trace.manifold_count = world.contact_manifolds.size();
   trace.solver = solver_result;
   trace.pipeline_summary =
-    "semi-implicit-euler -> articulated-body-dynamics -> manifolds -> " +
+    "semi-implicit-euler -> articulated-body-dynamics -> broadphase -> manifolds -> " +
     rex::solver::describe(config_.simulation.solver);
 
   return trace;

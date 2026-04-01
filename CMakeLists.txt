@@ -104,9 +104,8 @@ if(REX_ENABLE_PYTHON)
 endif()
 
 if(BUILD_TESTING AND REX_ENABLE_TESTS)
-  add_executable(rex_smoke tests/smoke_test.cpp)
-  rex_configure_target(rex_smoke)
-  target_link_libraries(rex_smoke PRIVATE rex_engine)
-  add_test(NAME rex_smoke COMMAND rex_smoke)
+  add_executable(rex_core_tests tests/core_test.cpp)
+  rex_configure_target(rex_core_tests)
+  target_link_libraries(rex_core_tests PRIVATE rex_engine)
+  add_test(NAME rex_core_tests COMMAND rex_core_tests)
 endif()
-

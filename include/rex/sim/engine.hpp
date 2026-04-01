@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <string>
 
 #include "rex/dynamics/world.hpp"
@@ -14,6 +15,8 @@ struct EngineConfig {
 struct StepTrace {
   std::size_t body_count{0};
   std::size_t articulation_count{0};
+  std::size_t broadphase_pair_count{0};
+  std::size_t manifold_count{0};
   rex::solver::SolverResult solver{};
   std::string pipeline_summary{};
 };
@@ -30,4 +33,3 @@ class Engine {
 };
 
 }  // namespace rex::sim
-

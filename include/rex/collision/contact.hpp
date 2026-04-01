@@ -2,11 +2,20 @@
 
 #include <array>
 #include <cstddef>
+#include <span>
+#include <vector>
 
+#include "rex/geometry/shapes.hpp"
 #include "rex/math/types.hpp"
 #include "rex/platform/handles.hpp"
 
 namespace rex::collision {
+
+struct BodyProxy {
+  rex::platform::EntityId id{};
+  rex::math::Transform pose{};
+  rex::geometry::Shape shape{};
+};
 
 struct BroadphasePair {
   rex::platform::EntityId body_a{};
@@ -34,5 +43,14 @@ struct CollisionPipelineConfig {
   bool enable_persistent_manifolds{true};
 };
 
-}  // namespace rex::collision
+struct CollisionFrame {
+  std::vector<BroadphasePair> broadphase_pairs{};
+  std::vector<ContactManifold> manifolds{};
+};
 
+[[nodiscard]] auto build_frame(
+  std::span<const BodyProxy> bodies,
+  std::span<const ContactManifold> previous_manifolds,
+  const CollisionPipelineConfig& config) -> CollisionFrame;
+
+}  // namespace rex::collision
