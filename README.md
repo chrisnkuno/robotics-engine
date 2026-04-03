@@ -77,14 +77,28 @@ Viewer controls:
 
 - `Space`: play/pause
 - `Left` / `Right`: step backward/forward
+- `Left mouse drag`: orbit camera
+- `Right mouse drag` or `Middle mouse drag`: pan camera
+- `Mouse wheel` or `+` / `-`: zoom / dolly
 - `W A S D`: pan camera
-- `+` / `-`: zoom
 - `C`: toggle contact markers
 - `N`: toggle contact normals
+- `G`: toggle grid
+- `T`: toggle motion trails
 - `R`: reset camera fit
-- `Left mouse`: inspect a body or contact
+- `Left mouse click`: inspect a body or contact
 - bottom scrub bar: drag to any captured frame
 - `Esc`: quit
+
+The desktop viewer now renders the replay as a simple real-time 3D scene with perspective, flat-shaded boxes/spheres, a ground grid, trails, and depth-sorted geometry.
+
+Optional mesh import:
+
+```bash
+REX_VIEWER_MESH_DIR=path/to/meshes ./build/rex_viewer_app --window run.rex
+```
+
+If `REX_VIEWER_MESH_DIR` is set, the viewer will look for per-body OBJ files named `<body-id>.obj` and use them in place of the built-in primitive mesh.
 
 ## Optional Features
 

@@ -29,6 +29,8 @@ int main(int argc, char** argv) {
     std::cerr << "   or: rex_viewer_app --demo <output-dir>\n";
     std::cerr << "   or: rex_viewer_app --window <replay-file> [max-frames]\n";
     std::cerr << "   or: rex_viewer_app --demo-window [max-frames]\n";
+    std::cerr << "   or: rex_viewer_app --demo-shot <output-bmp>\n";
+    std::cerr << "   or: rex_viewer_app --window-shot <replay-file> <output-bmp>\n";
     std::cerr << "   or: rex_viewer_app --live-demo-window [max-frames]\n";
     return 1;
   }
@@ -74,6 +76,26 @@ int main(int argc, char** argv) {
       const std::size_t max_frames = argc == 3 ? static_cast<std::size_t>(std::stoul(argv[2])) : 0;
       const rex::viewer::ReplayLog replay = rex::viewer::build_demo_replay();
       return rex::viewer::run_windowed_viewer(replay, {.max_frames = max_frames});
+    }
+
+    if (mode == "--demo-shot") {
+      if (argc != 3) {
+        std::cerr << "usage: rex_viewer_app --demo-shot <output-bmp>\n";
+        return 1;
+      }
+
+      const rex::viewer::ReplayLog replay = rex::viewer::build_demo_replay();
+      return rex::viewer::run_windowed_viewer(replay, {.max_frames = 1, .screenshot_path = argv[2]});
+    }
+
+    if (mode == "--window-shot") {
+      if (argc != 4) {
+        std::cerr << "usage: rex_viewer_app --window-shot <replay-file> <output-bmp>\n";
+        return 1;
+      }
+
+      const rex::viewer::ReplayLog replay = rex::viewer::ReplayLog::load(argv[2]);
+      return rex::viewer::run_windowed_viewer(replay, {.max_frames = 1, .screenshot_path = argv[3]});
     }
 
     if (mode == "--live-demo-window") {

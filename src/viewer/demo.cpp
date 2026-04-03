@@ -48,10 +48,20 @@ DemoSceneRunner::DemoSceneRunner() : engine_(config_) {
   const std::size_t contact_sphere_index =
     world_.bodies.add_body(make_sphere_body(101, {1.15, 0.0, 0.0}, 0.75));
   const std::size_t falling_sphere_index =
-    world_.bodies.add_body(make_sphere_body(102, {-0.6, 0.0, 2.4}, 0.35));
+    world_.bodies.add_body(make_sphere_body(102, {-0.8, -0.55, 2.45}, 0.35));
+  const std::size_t side_column_index =
+    world_.bodies.add_body(make_box_body(
+      103,
+      {-1.4, 1.05, 0.8},
+      {0.22, 0.22, 0.8},
+      rex::math::quat_from_axis_angle({0.0, 0.0, 1.0}, 0.2)));
+  const std::size_t floating_sphere_index =
+    world_.bodies.add_body(make_sphere_body(104, {0.2, 1.1, 1.65}, 0.24));
   (void)ground_index;
   (void)contact_sphere_index;
   (void)falling_sphere_index;
+  (void)side_column_index;
+  (void)floating_sphere_index;
 }
 
 auto DemoSceneRunner::step_frame() -> FrameSnapshot {

@@ -229,12 +229,12 @@ void test_viewer_controller_camera_fit_and_projection() {
   const rex::viewer::FrameViewport viewport{.width = 1000.0, .height = 800.0, .margin = 100.0};
   rex::viewer::fit_camera_to_frame(state, frame, viewport);
 
-  expect(state.camera.zoom > 0.0, "camera fit should produce a positive zoom");
-  expect(nearly_equal(state.camera.center_x, 0.0), "camera fit should center the x range");
-  expect(nearly_equal(state.camera.center_z, 0.5), "camera fit should center the z range");
+  expect(state.camera.distance > 0.0, "camera fit should produce a positive camera distance");
+  expect(nearly_equal(state.camera.target.x, 0.0), "camera fit should center the x range");
+  expect(nearly_equal(state.camera.target.z, 0.5), "camera fit should center the z range");
 
   const rex::viewer::ScreenPoint projected =
-    rex::viewer::project_point(state.camera, viewport, rex::math::Vec3{0.0, 0.0, 0.5});
+    rex::viewer::project_point(state.camera, viewport, state.camera.target);
   expect(nearly_equal(projected.x, viewport.width * 0.5), "projection should map center x to viewport center");
   expect(nearly_equal(projected.y, viewport.height * 0.5), "projection should map center z to viewport center");
 }
@@ -250,12 +250,12 @@ void test_viewer_controller_overlay_toggles() {
   rex::viewer::apply_command(state, replay, rex::viewer::ViewerCommand::kToggleNormals, viewport);
   expect(!state.overlay.show_normals, "normal toggle should hide normals");
 
-  const double initial_zoom = state.camera.zoom;
+  const double initial_distance = state.camera.distance;
   rex::viewer::apply_command(state, replay, rex::viewer::ViewerCommand::kZoomIn, viewport);
-  expect(state.camera.zoom > initial_zoom, "zoom in should increase zoom");
+  expect(state.camera.distance < initial_distance, "zoom in should dolly the camera closer");
 
   rex::viewer::apply_command(state, replay, rex::viewer::ViewerCommand::kPanRight, viewport);
-  expect(state.camera.center_x > 0.0, "pan right should move the camera center");
+  expect(state.camera.target.x > 0.0, "pan right should move the camera target");
 }
 
 void test_viewer_camera_fit_keeps_geometry_inside_margin() {

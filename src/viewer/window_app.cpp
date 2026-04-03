@@ -6,11 +6,18 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <functional>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
+#include <unordered_map>
+#include <utility>
+#include <vector>
 
 #include "rex/platform/profile.hpp"
 #include "rex/viewer/controller.hpp"
@@ -23,6 +30,13 @@ constexpr int kDefaultWidth = 1280;
 constexpr int kDefaultHeight = 800;
 constexpr int kSelectionOutlineThickness = 3;
 constexpr double kAverageAlpha = 0.15;
+constexpr double kOrbitRadiansPerPixel = 0.012;
+constexpr double kPanWorldUnitsPerPixel = 0.0022;
+constexpr double kClickThresholdPixels = 6.0;
+constexpr double kTrailFrameWindow = 48.0;
+constexpr double kPi = 3.14159265358979323846;
+constexpr int kSphereLatitudeSegments = 12;
+constexpr int kSphereLongitudeSegments = 18;
 
 struct ViewerFrameProfile {
   double event_ms{0.0};
@@ -40,11 +54,67 @@ struct ViewerFrameAverages {
   double frame_ms{0.0};
 };
 
-auto set_color(SDL_Renderer* renderer, const std::array<std::uint8_t, 4>& color) -> void {
-  SDL_SetRenderDrawColor(renderer, color[0], color[1], color[2], color[3]);
+struct MeshTriangle {
+  rex::math::Vec3 a{};
+  rex::math::Vec3 b{};
+  rex::math::Vec3 c{};
+};
+
+struct MeshData {
+  std::vector<MeshTriangle> triangles{};
+};
+
+struct RenderTriangle {
+  std::array<SDL_Vertex, 3> vertices{};
+  double depth{0.0};
+};
+
+struct RenderLine {
+  ScreenPoint start{};
+  ScreenPoint end{};
+  SDL_Color color{};
+  double depth{0.0};
+};
+
+struct RenderScene {
+  std::vector<RenderTriangle> triangles{};
+  std::vector<RenderLine> lines{};
+};
+
+struct MeshLibrary {
+  MeshData unit_box{};
+  MeshData unit_sphere{};
+  std::filesystem::path mesh_dir{};
+  std::unordered_map<std::uint32_t, std::optional<MeshData>> imported{};
+};
+
+enum class DragMode {
+  kNone,
+  kTimeline,
+  kOrbit,
+  kPan,
+};
+
+struct PointerDragState {
+  DragMode mode{DragMode::kNone};
+  ScreenPoint anchor{};
+  ScreenPoint last{};
+  bool click_candidate{false};
+};
+
+[[nodiscard]] auto make_vertex(double x, double y, const SDL_Color& color) -> SDL_Vertex {
+  return {
+    .position = {static_cast<float>(x), static_cast<float>(y)},
+    .color = color,
+    .tex_coord = {0.0f, 0.0f},
+  };
 }
 
-auto color_for_body(rex::platform::EntityId id) -> std::array<std::uint8_t, 4> {
+auto set_color(SDL_Renderer* renderer, const SDL_Color& color) -> void {
+  SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, color.a);
+}
+
+auto color_for_body(rex::platform::EntityId id) -> SDL_Color {
   const std::uint32_t seed = id.index * 2654435761u;
   return {
     static_cast<std::uint8_t>(90 + (seed % 120)),
@@ -52,6 +122,22 @@ auto color_for_body(rex::platform::EntityId id) -> std::array<std::uint8_t, 4> {
     static_cast<std::uint8_t>(120 + ((seed >> 16) % 100)),
     255,
   };
+}
+
+[[nodiscard]] auto modulate_color(const SDL_Color& color, double factor, std::uint8_t alpha = 255) -> SDL_Color {
+  factor = std::clamp(factor, 0.0, 1.4);
+  return {
+    static_cast<std::uint8_t>(std::clamp(std::lround(static_cast<double>(color.r) * factor), 0l, 255l)),
+    static_cast<std::uint8_t>(std::clamp(std::lround(static_cast<double>(color.g) * factor), 0l, 255l)),
+    static_cast<std::uint8_t>(std::clamp(std::lround(static_cast<double>(color.b) * factor), 0l, 255l)),
+    alpha,
+  };
+}
+
+[[nodiscard]] auto distance_squared(const ScreenPoint& lhs, const ScreenPoint& rhs) -> double {
+  const double dx = lhs.x - rhs.x;
+  const double dy = lhs.y - rhs.y;
+  return (dx * dx) + (dy * dy);
 }
 
 [[nodiscard]] auto make_title(
@@ -64,10 +150,7 @@ auto color_for_body(rex::platform::EntityId id) -> std::array<std::uint8_t, 4> {
   title << "rex viewer | frame " << (state.current_frame + 1) << '/' << replay.size()
         << " | " << (state.playback == PlaybackMode::kPlaying ? "playing" : "paused")
         << " | contacts " << frame.trace.solver.contact_count
-        << " | sim "
-        << frame.trace.profile.total_ms << "ms"
-        << " (c " << frame.trace.profile.collision_ms
-        << " s " << frame.trace.profile.solver_ms << ")"
+        << " | sim " << frame.trace.profile.total_ms << "ms"
         << " | draw " << averages.draw_ms << "ms"
         << " | cache " << averages.cache_build_ms << "ms"
         << " | frame " << averages.frame_ms << "ms";
@@ -78,26 +161,22 @@ auto color_for_body(rex::platform::EntityId id) -> std::array<std::uint8_t, 4> {
 
   if (state.selection.body_index.has_value() && *state.selection.body_index < frame.bodies.size()) {
     const SnapshotBody& body = frame.bodies[*state.selection.body_index];
-    title << " | body "
-          << body.id.index
-          << " "
-          << (body.shape == SnapshotShapeKind::kBox ? "box" : "sphere")
+    title << " | body " << body.id.index
           << " pos=(" << body.translation.x << "," << body.translation.y << "," << body.translation.z << ")";
   } else if (state.selection.contact_index.has_value() && *state.selection.contact_index < frame.contacts.size()) {
     const SnapshotContact& contact = frame.contacts[*state.selection.contact_index];
     title << " | contact "
           << contact.body_a.index << "-" << contact.body_b.index
-          << " pen=" << contact.penetration
-          << " normal=(" << contact.normal.x << "," << contact.normal.y << "," << contact.normal.z << ")";
+          << " pen=" << contact.penetration;
   }
 
-  title << " | space play/pause, arrows step, wasd pan, +/- zoom, c/n overlays, r reset";
+  title << " | mouse: drag orbit/right-pan/wheel zoom | keys: space arrows wasd +/- c n g t r";
   return title.str();
 }
 
 auto draw_filled_circle(SDL_Renderer* renderer, int cx, int cy, int radius) -> void {
   for (int dy = -radius; dy <= radius; ++dy) {
-    const int dx = static_cast<int>(std::sqrt((radius * radius) - (dy * dy)));
+    const int dx = static_cast<int>(std::sqrt(std::max((radius * radius) - (dy * dy), 0)));
     SDL_RenderDrawLine(renderer, cx - dx, cy + dy, cx + dx, cy + dy);
   }
 }
@@ -128,46 +207,6 @@ auto draw_rect_outline(SDL_Renderer* renderer, SDL_Rect rect, int thickness) -> 
   }
 }
 
-auto viewport_for_window(SDL_Window* window) -> FrameViewport {
-  int width = kDefaultWidth;
-  int height = kDefaultHeight;
-  SDL_GetWindowSize(window, &width, &height);
-  return {
-    .width = static_cast<double>(width),
-    .height = static_cast<double>(height),
-    .margin = 60.0,
-  };
-}
-
-auto polygon_centroid(const std::vector<ScreenPoint>& polygon) -> ScreenPoint {
-  ScreenPoint centroid{};
-  if (polygon.empty()) {
-    return centroid;
-  }
-
-  for (const ScreenPoint& point : polygon) {
-    centroid.x += point.x;
-    centroid.y += point.y;
-  }
-  centroid.x /= static_cast<double>(polygon.size());
-  centroid.y /= static_cast<double>(polygon.size());
-  return centroid;
-}
-
-void update_average(double sample, double& average) {
-  average = average == 0.0
-    ? sample
-    : (average + ((sample - average) * kAverageAlpha));
-}
-
-void update_averages(const ViewerFrameProfile& sample, ViewerFrameAverages& averages) {
-  update_average(sample.event_ms, averages.event_ms);
-  update_average(sample.live_pump_ms, averages.live_pump_ms);
-  update_average(sample.cache_build_ms, averages.cache_build_ms);
-  update_average(sample.draw_ms, averages.draw_ms);
-  update_average(sample.frame_ms, averages.frame_ms);
-}
-
 auto draw_polygon_outline(SDL_Renderer* renderer, const std::vector<ScreenPoint>& polygon, int thickness = 1) -> void {
   if (polygon.size() < 2) {
     return;
@@ -187,137 +226,461 @@ auto draw_polygon_outline(SDL_Renderer* renderer, const std::vector<ScreenPoint>
   }
 }
 
-#if SDL_VERSION_ATLEAST(2, 0, 18)
-auto draw_filled_polygon(
-  SDL_Renderer* renderer,
-  const std::vector<ScreenPoint>& polygon,
-  const std::array<std::uint8_t, 4>& color) -> void {
-  if (polygon.size() < 3) {
-    draw_polygon_outline(renderer, polygon);
-    return;
+auto viewport_for_window(SDL_Window* window) -> FrameViewport {
+  int width = kDefaultWidth;
+  int height = kDefaultHeight;
+  SDL_GetWindowSize(window, &width, &height);
+  return {
+    .width = static_cast<double>(width),
+    .height = static_cast<double>(height),
+    .margin = 60.0,
+  };
+}
+
+void save_screenshot(SDL_Renderer* renderer, const FrameViewport& viewport, const std::filesystem::path& path) {
+  if (!path.parent_path().empty()) {
+    std::filesystem::create_directories(path.parent_path());
+  }
+  SDL_Surface* surface = SDL_CreateRGBSurfaceWithFormat(
+    0,
+    static_cast<int>(std::round(viewport.width)),
+    static_cast<int>(std::round(viewport.height)),
+    32,
+    SDL_PIXELFORMAT_ARGB8888);
+  if (surface == nullptr) {
+    throw std::runtime_error(std::string{"SDL_CreateRGBSurfaceWithFormat failed: "} + SDL_GetError());
   }
 
-  const ScreenPoint centroid = polygon_centroid(polygon);
-  std::vector<SDL_Vertex> vertices{};
-  vertices.reserve(polygon.size() + 1);
-  vertices.push_back({
-    .position = {static_cast<float>(centroid.x), static_cast<float>(centroid.y)},
-    .color = {color[0], color[1], color[2], color[3]},
-    .tex_coord = {0.0f, 0.0f},
-  });
-  for (const ScreenPoint& point : polygon) {
-    vertices.push_back({
-      .position = {static_cast<float>(point.x), static_cast<float>(point.y)},
-      .color = {color[0], color[1], color[2], color[3]},
-      .tex_coord = {0.0f, 0.0f},
+  const int read_result = SDL_RenderReadPixels(renderer, nullptr, SDL_PIXELFORMAT_ARGB8888, surface->pixels, surface->pitch);
+  if (read_result != 0) {
+    SDL_FreeSurface(surface);
+    throw std::runtime_error(std::string{"SDL_RenderReadPixels failed: "} + SDL_GetError());
+  }
+
+  if (SDL_SaveBMP(surface, path.string().c_str()) != 0) {
+    SDL_FreeSurface(surface);
+    throw std::runtime_error(std::string{"SDL_SaveBMP failed: "} + SDL_GetError());
+  }
+
+  SDL_FreeSurface(surface);
+}
+
+void update_average(double sample, double& average) {
+  average = average == 0.0 ? sample : (average + ((sample - average) * kAverageAlpha));
+}
+
+void update_averages(const ViewerFrameProfile& sample, ViewerFrameAverages& averages) {
+  update_average(sample.event_ms, averages.event_ms);
+  update_average(sample.live_pump_ms, averages.live_pump_ms);
+  update_average(sample.cache_build_ms, averages.cache_build_ms);
+  update_average(sample.draw_ms, averages.draw_ms);
+  update_average(sample.frame_ms, averages.frame_ms);
+}
+
+[[nodiscard]] auto make_unit_box_mesh() -> MeshData {
+  MeshData mesh{};
+  const std::array<rex::math::Vec3, 8> corners = {{
+    {-1.0, -1.0, -1.0},
+    {1.0, -1.0, -1.0},
+    {1.0, 1.0, -1.0},
+    {-1.0, 1.0, -1.0},
+    {-1.0, -1.0, 1.0},
+    {1.0, -1.0, 1.0},
+    {1.0, 1.0, 1.0},
+    {-1.0, 1.0, 1.0},
+  }};
+  const auto add_face = [&](int a, int b, int c, int d) {
+    mesh.triangles.push_back({corners[a], corners[b], corners[c]});
+    mesh.triangles.push_back({corners[a], corners[c], corners[d]});
+  };
+
+  add_face(0, 1, 2, 3);
+  add_face(4, 7, 6, 5);
+  add_face(0, 4, 5, 1);
+  add_face(1, 5, 6, 2);
+  add_face(2, 6, 7, 3);
+  add_face(3, 7, 4, 0);
+  return mesh;
+}
+
+[[nodiscard]] auto spherical_point(double theta, double phi) -> rex::math::Vec3 {
+  return {
+    std::sin(phi) * std::cos(theta),
+    std::sin(phi) * std::sin(theta),
+    std::cos(phi),
+  };
+}
+
+[[nodiscard]] auto make_unit_sphere_mesh() -> MeshData {
+  MeshData mesh{};
+  for (int lat = 0; lat < kSphereLatitudeSegments; ++lat) {
+    const double phi0 = kPi * static_cast<double>(lat) / static_cast<double>(kSphereLatitudeSegments);
+    const double phi1 = kPi * static_cast<double>(lat + 1) / static_cast<double>(kSphereLatitudeSegments);
+    for (int lon = 0; lon < kSphereLongitudeSegments; ++lon) {
+      const double theta0 = (2.0 * kPi * static_cast<double>(lon)) / static_cast<double>(kSphereLongitudeSegments);
+      const double theta1 = (2.0 * kPi * static_cast<double>(lon + 1)) / static_cast<double>(kSphereLongitudeSegments);
+
+      const rex::math::Vec3 p00 = spherical_point(theta0, phi0);
+      const rex::math::Vec3 p01 = spherical_point(theta1, phi0);
+      const rex::math::Vec3 p10 = spherical_point(theta0, phi1);
+      const rex::math::Vec3 p11 = spherical_point(theta1, phi1);
+
+      if (lat > 0) {
+        mesh.triangles.push_back({p00, p10, p11});
+      }
+      if (lat + 1 < kSphereLatitudeSegments) {
+        mesh.triangles.push_back({p00, p11, p01});
+      }
+    }
+  }
+
+  return mesh;
+}
+
+[[nodiscard]] auto try_parse_index(std::string_view token) -> int {
+  if (token.empty()) {
+    return 0;
+  }
+
+  return std::stoi(std::string{token});
+}
+
+[[nodiscard]] auto normalize_mesh(MeshData mesh) -> MeshData {
+  rex::math::Vec3 min{std::numeric_limits<double>::infinity(), std::numeric_limits<double>::infinity(), std::numeric_limits<double>::infinity()};
+  rex::math::Vec3 max{-std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity()};
+
+  for (const MeshTriangle& triangle : mesh.triangles) {
+    for (const rex::math::Vec3 vertex : {triangle.a, triangle.b, triangle.c}) {
+      min.x = std::min(min.x, vertex.x);
+      min.y = std::min(min.y, vertex.y);
+      min.z = std::min(min.z, vertex.z);
+      max.x = std::max(max.x, vertex.x);
+      max.y = std::max(max.y, vertex.y);
+      max.z = std::max(max.z, vertex.z);
+    }
+  }
+
+  const rex::math::Vec3 center = (min + max) * 0.5;
+  const rex::math::Vec3 half_extents{
+    std::max((max.x - min.x) * 0.5, 1.0e-6),
+    std::max((max.y - min.y) * 0.5, 1.0e-6),
+    std::max((max.z - min.z) * 0.5, 1.0e-6),
+  };
+
+  for (MeshTriangle& triangle : mesh.triangles) {
+    triangle.a = {
+      (triangle.a.x - center.x) / half_extents.x,
+      (triangle.a.y - center.y) / half_extents.y,
+      (triangle.a.z - center.z) / half_extents.z,
+    };
+    triangle.b = {
+      (triangle.b.x - center.x) / half_extents.x,
+      (triangle.b.y - center.y) / half_extents.y,
+      (triangle.b.z - center.z) / half_extents.z,
+    };
+    triangle.c = {
+      (triangle.c.x - center.x) / half_extents.x,
+      (triangle.c.y - center.y) / half_extents.y,
+      (triangle.c.z - center.z) / half_extents.z,
+    };
+  }
+
+  return mesh;
+}
+
+[[nodiscard]] auto load_obj_mesh(const std::filesystem::path& path) -> std::optional<MeshData> {
+  std::ifstream input{path};
+  if (!input.is_open()) {
+    return std::nullopt;
+  }
+
+  std::vector<rex::math::Vec3> positions{};
+  MeshData mesh{};
+  std::string line{};
+  while (std::getline(input, line)) {
+    std::istringstream stream{line};
+    std::string kind{};
+    stream >> kind;
+    if (kind == "v") {
+      rex::math::Vec3 position{};
+      stream >> position.x >> position.y >> position.z;
+      positions.push_back(position);
+      continue;
+    }
+
+    if (kind != "f") {
+      continue;
+    }
+
+    std::vector<int> face_indices{};
+    std::string token{};
+    while (stream >> token) {
+      const std::size_t slash = token.find('/');
+      const std::string_view index_token = slash == std::string::npos
+        ? std::string_view{token}
+        : std::string_view{token}.substr(0, slash);
+      const int index = try_parse_index(index_token);
+      if (index == 0) {
+        continue;
+      }
+      face_indices.push_back(index > 0 ? index - 1 : static_cast<int>(positions.size()) + index);
+    }
+
+    if (face_indices.size() < 3) {
+      continue;
+    }
+
+    for (std::size_t face_index = 1; face_index + 1 < face_indices.size(); ++face_index) {
+      const int a = face_indices[0];
+      const int b = face_indices[face_index];
+      const int c = face_indices[face_index + 1];
+      if (a < 0 || b < 0 || c < 0 ||
+          a >= static_cast<int>(positions.size()) ||
+          b >= static_cast<int>(positions.size()) ||
+          c >= static_cast<int>(positions.size())) {
+        continue;
+      }
+      mesh.triangles.push_back({positions[a], positions[b], positions[c]});
+    }
+  }
+
+  if (mesh.triangles.empty()) {
+    return std::nullopt;
+  }
+
+  return normalize_mesh(std::move(mesh));
+}
+
+[[nodiscard]] auto make_mesh_library() -> MeshLibrary {
+  MeshLibrary library{};
+  library.unit_box = make_unit_box_mesh();
+  library.unit_sphere = make_unit_sphere_mesh();
+  if (const char* mesh_dir = std::getenv("REX_VIEWER_MESH_DIR")) {
+    library.mesh_dir = mesh_dir;
+  }
+  return library;
+}
+
+auto mesh_for_body(MeshLibrary& library, const SnapshotBody& body) -> const MeshData& {
+  if (!library.mesh_dir.empty()) {
+    const auto cached = library.imported.find(body.id.index);
+    if (cached == library.imported.end()) {
+      const std::filesystem::path mesh_path = library.mesh_dir / (std::to_string(body.id.index) + ".obj");
+      library.imported.emplace(body.id.index, load_obj_mesh(mesh_path));
+    }
+
+    const auto it = library.imported.find(body.id.index);
+    if (it != library.imported.end() && it->second.has_value()) {
+      return *it->second;
+    }
+  }
+
+  return body.shape == SnapshotShapeKind::kBox ? library.unit_box : library.unit_sphere;
+}
+
+[[nodiscard]] auto body_scale(const SnapshotBody& body) -> rex::math::Vec3 {
+  if (body.shape == SnapshotShapeKind::kSphere) {
+    return {body.dimensions.x, body.dimensions.x, body.dimensions.x};
+  }
+
+  return body.dimensions;
+}
+
+[[nodiscard]] auto transform_mesh_vertex(
+  const SnapshotBody& body,
+  const rex::math::Vec3& local_vertex) -> rex::math::Vec3 {
+  const rex::math::Vec3 scale = body_scale(body);
+  return rex::math::transform_point(
+    {.rotation = body.rotation, .translation = body.translation},
+    {
+      local_vertex.x * scale.x,
+      local_vertex.y * scale.y,
+      local_vertex.z * scale.z,
+    });
+}
+
+[[nodiscard]] auto triangle_depth(
+  const Camera3D& camera,
+  const rex::math::Vec3& a,
+  const rex::math::Vec3& b,
+  const rex::math::Vec3& c) -> double {
+  const rex::math::Vec3 camera_pos = camera_position(camera);
+  const rex::math::Vec3 forward = camera_forward(camera);
+  return (
+    rex::math::dot(a - camera_pos, forward) +
+    rex::math::dot(b - camera_pos, forward) +
+    rex::math::dot(c - camera_pos, forward)) / 3.0;
+}
+
+void append_body_mesh(
+  RenderScene& scene,
+  MeshLibrary& library,
+  const Camera3D& camera,
+  const FrameViewport& viewport,
+  const SnapshotBody& body,
+  bool selected) {
+  const MeshData& mesh = mesh_for_body(library, body);
+  const SDL_Color base_color = color_for_body(body.id);
+  const rex::math::Vec3 camera_pos = camera_position(camera);
+  const rex::math::Vec3 light_dir = rex::math::normalized_or(rex::math::Vec3{0.45, -0.35, 0.8});
+
+  for (const MeshTriangle& triangle : mesh.triangles) {
+    const rex::math::Vec3 a = transform_mesh_vertex(body, triangle.a);
+    const rex::math::Vec3 b = transform_mesh_vertex(body, triangle.b);
+    const rex::math::Vec3 c = transform_mesh_vertex(body, triangle.c);
+    const rex::math::Vec3 normal = rex::math::normalized_or(rex::math::cross(b - a, c - a), {0.0, 0.0, 1.0});
+    const rex::math::Vec3 centroid = (a + b + c) / 3.0;
+    const rex::math::Vec3 to_camera = rex::math::normalized_or(camera_pos - centroid, {0.0, 1.0, 0.0});
+    if (rex::math::dot(normal, to_camera) <= 0.0) {
+      continue;
+    }
+
+    const ProjectedPoint pa = project_to_screen(camera, viewport, a);
+    const ProjectedPoint pb = project_to_screen(camera, viewport, b);
+    const ProjectedPoint pc = project_to_screen(camera, viewport, c);
+    if (!pa.visible || !pb.visible || !pc.visible) {
+      continue;
+    }
+
+    const double diffuse = std::max(rex::math::dot(normal, light_dir), 0.0);
+    const double rim = std::pow(1.0 - std::max(rex::math::dot(normal, to_camera), 0.0), 2.0);
+    const double intensity = 0.24 + (diffuse * 0.72) + (rim * 0.14) + (selected ? 0.12 : 0.0);
+    const SDL_Color color = modulate_color(base_color, intensity);
+
+    scene.triangles.push_back({
+      .vertices = {{
+        make_vertex(pa.point.x, pa.point.y, color),
+        make_vertex(pb.point.x, pb.point.y, color),
+        make_vertex(pc.point.x, pc.point.y, color),
+      }},
+      .depth = triangle_depth(camera, a, b, c),
     });
   }
+}
 
-  std::vector<int> indices{};
-  indices.reserve(polygon.size() * 3);
-  for (std::size_t index = 0; index < polygon.size(); ++index) {
-    indices.push_back(0);
-    indices.push_back(static_cast<int>(index + 1));
-    indices.push_back(static_cast<int>((index + 1) % polygon.size()) + 1);
+void append_grid(RenderScene& scene, const Camera3D& camera, const FrameViewport& viewport) {
+  const double extent = std::max(6.0, std::ceil(camera.distance * 1.5));
+  const double target_x = std::round(camera.target.x);
+  const double target_y = std::round(camera.target.y);
+
+  for (int offset = -static_cast<int>(extent); offset <= static_cast<int>(extent); ++offset) {
+    const double x = target_x + static_cast<double>(offset);
+    const double y = target_y + static_cast<double>(offset);
+    const SDL_Color x_color = offset == 0 ? SDL_Color{194, 104, 89, 255} : SDL_Color{205, 200, 188, 160};
+    const SDL_Color y_color = offset == 0 ? SDL_Color{91, 151, 96, 255} : SDL_Color{205, 200, 188, 160};
+
+    const rex::math::Vec3 x0{x, target_y - extent, 0.0};
+    const rex::math::Vec3 x1{x, target_y + extent, 0.0};
+    const rex::math::Vec3 y0{target_x - extent, y, 0.0};
+    const rex::math::Vec3 y1{target_x + extent, y, 0.0};
+
+    const ProjectedPoint px0 = project_to_screen(camera, viewport, x0);
+    const ProjectedPoint px1 = project_to_screen(camera, viewport, x1);
+    const ProjectedPoint py0 = project_to_screen(camera, viewport, y0);
+    const ProjectedPoint py1 = project_to_screen(camera, viewport, y1);
+
+    if (px0.visible && px1.visible) {
+      scene.lines.push_back({.start = px0.point, .end = px1.point, .color = x_color, .depth = std::min(px0.depth, px1.depth)});
+    }
+    if (py0.visible && py1.visible) {
+      scene.lines.push_back({.start = py0.point, .end = py1.point, .color = y_color, .depth = std::min(py0.depth, py1.depth)});
+    }
   }
 
-  SDL_RenderGeometry(renderer, nullptr, vertices.data(), static_cast<int>(vertices.size()), indices.data(), static_cast<int>(indices.size()));
+  const ProjectedPoint z0 = project_to_screen(camera, viewport, {target_x, target_y, 0.0});
+  const ProjectedPoint z1 = project_to_screen(camera, viewport, {target_x, target_y, extent * 0.75});
+  if (z0.visible && z1.visible) {
+    scene.lines.push_back({.start = z0.point, .end = z1.point, .color = {76, 118, 201, 255}, .depth = std::min(z0.depth, z1.depth)});
+  }
 }
-#else
-auto draw_filled_polygon(
-  SDL_Renderer* renderer,
-  const std::vector<ScreenPoint>& polygon,
-  const std::array<std::uint8_t, 4>&) -> void {
-  draw_polygon_outline(renderer, polygon);
-}
-#endif
 
-auto handle_key(
-  ViewerState& state,
+void append_trails(
+  RenderScene& scene,
   const ReplayLog& replay,
-  const SDL_KeyboardEvent& key,
-  const FrameViewport& viewport,
-  bool& should_quit) -> void {
-  if (key.repeat != 0) {
+  const ViewerState& state,
+  const FrameViewport& viewport) {
+  if (replay.empty()) {
     return;
   }
 
-  switch (key.keysym.sym) {
-    case SDLK_ESCAPE:
-      should_quit = true;
-      return;
-    case SDLK_SPACE:
-      apply_command(state, replay, ViewerCommand::kTogglePlayPause, viewport);
-      return;
-    case SDLK_RIGHT:
-      apply_command(state, replay, ViewerCommand::kStepForward, viewport);
-      return;
-    case SDLK_LEFT:
-      apply_command(state, replay, ViewerCommand::kStepBackward, viewport);
-      return;
-    case SDLK_c:
-      apply_command(state, replay, ViewerCommand::kToggleContacts, viewport);
-      return;
-    case SDLK_n:
-      apply_command(state, replay, ViewerCommand::kToggleNormals, viewport);
-      return;
-    case SDLK_r:
-      apply_command(state, replay, ViewerCommand::kResetCamera, viewport);
-      return;
-    case SDLK_EQUALS:
-    case SDLK_PLUS:
-    case SDLK_KP_PLUS:
-      apply_command(state, replay, ViewerCommand::kZoomIn, viewport);
-      return;
-    case SDLK_MINUS:
-    case SDLK_KP_MINUS:
-      apply_command(state, replay, ViewerCommand::kZoomOut, viewport);
-      return;
-    case SDLK_a:
-      apply_command(state, replay, ViewerCommand::kPanLeft, viewport);
-      return;
-    case SDLK_d:
-      apply_command(state, replay, ViewerCommand::kPanRight, viewport);
-      return;
-    case SDLK_w:
-      apply_command(state, replay, ViewerCommand::kPanUp, viewport);
-      return;
-    case SDLK_s:
-      apply_command(state, replay, ViewerCommand::kPanDown, viewport);
-      return;
-    default:
-      return;
+  const std::size_t first_frame = state.current_frame > static_cast<std::size_t>(kTrailFrameWindow)
+    ? state.current_frame - static_cast<std::size_t>(kTrailFrameWindow)
+    : 0;
+
+  for (std::size_t body_index = 0; body_index < replay.frames()[state.current_frame].bodies.size(); ++body_index) {
+    const SnapshotBody& current_body = replay.frames()[state.current_frame].bodies[body_index];
+    ScreenPoint previous_point{};
+    double previous_depth = 0.0;
+    bool has_previous = false;
+    for (std::size_t frame_index = first_frame; frame_index <= state.current_frame; ++frame_index) {
+      const FrameSnapshot& frame = replay.frames()[frame_index];
+      if (body_index >= frame.bodies.size()) {
+        continue;
+      }
+
+      const ProjectedPoint projected = project_to_screen(state.camera, viewport, frame.bodies[body_index].translation);
+      if (!projected.visible) {
+        has_previous = false;
+        continue;
+      }
+
+      if (has_previous) {
+        const double alpha = static_cast<double>(frame_index - first_frame + 1) /
+          static_cast<double>(state.current_frame - first_frame + 1);
+        scene.lines.push_back({
+          .start = previous_point,
+          .end = projected.point,
+          .color = modulate_color(color_for_body(current_body.id), 0.85, static_cast<std::uint8_t>(50 + std::lround(alpha * 110.0))),
+          .depth = std::min(previous_depth, projected.depth),
+        });
+      }
+
+      previous_point = projected.point;
+      previous_depth = projected.depth;
+      has_previous = true;
+    }
   }
 }
 
-auto draw_box(
-  SDL_Renderer* renderer,
-  const ProjectedBody& body,
-  const std::array<std::uint8_t, 4>& fill_color)
-  -> void {
-  draw_filled_polygon(renderer, body.outline, fill_color);
-  set_color(renderer, {34, 30, 28, 255});
-  draw_polygon_outline(renderer, body.outline);
+void append_scene_geometry(
+  RenderScene& scene,
+  MeshLibrary& library,
+  const ReplayLog& replay,
+  const FrameSnapshot& frame,
+  const ViewerState& state,
+  const FrameViewport& viewport) {
+  if (state.overlay.show_grid) {
+    append_grid(scene, state.camera, viewport);
+  }
+  if (state.overlay.show_trails) {
+    append_trails(scene, replay, state, viewport);
+  }
+
+  for (std::size_t body_index = 0; body_index < frame.bodies.size(); ++body_index) {
+    append_body_mesh(
+      scene,
+      library,
+      state.camera,
+      viewport,
+      frame.bodies[body_index],
+      state.selection.body_index == std::optional<std::size_t>{body_index});
+  }
+
+  std::sort(
+    scene.triangles.begin(),
+    scene.triangles.end(),
+    [](const RenderTriangle& lhs, const RenderTriangle& rhs) {
+      return lhs.depth > rhs.depth;
+    });
+  std::sort(
+    scene.lines.begin(),
+    scene.lines.end(),
+    [](const RenderLine& lhs, const RenderLine& rhs) {
+      return lhs.depth > rhs.depth;
+    });
 }
 
-auto draw_sphere(SDL_Renderer* renderer, const ProjectedBody& body)
-  -> void {
-  const int radius = std::max(static_cast<int>(std::round(body.radius_pixels)), 2);
-  draw_filled_circle(
-    renderer,
-    static_cast<int>(std::round(body.center.x)),
-    static_cast<int>(std::round(body.center.y)),
-    radius);
-  set_color(renderer, {34, 30, 28, 255});
-  draw_filled_circle(
-    renderer,
-    static_cast<int>(std::round(body.center.x)),
-    static_cast<int>(std::round(body.center.y)),
-    1);
-}
-
-auto draw_timeline(SDL_Renderer* renderer, const ReplayLog& replay, const ViewerState& state, const FrameViewport& viewport)
-  -> void {
+void draw_timeline(SDL_Renderer* renderer, const ReplayLog& replay, const ViewerState& state, const FrameViewport& viewport) {
   const TimelineRect timeline = timeline_rect(viewport);
   SDL_Rect background{
     .x = static_cast<int>(std::round(timeline.left)),
@@ -356,45 +719,47 @@ auto draw_timeline(SDL_Renderer* renderer, const ReplayLog& replay, const Viewer
   }
 }
 
-auto draw_frame(
+void draw_frame(
   SDL_Renderer* renderer,
+  MeshLibrary& library,
   const ReplayLog& replay,
   const FrameSnapshot& frame,
   const ViewerState& state,
   const FrameViewport& viewport,
-  const FrameProjectionCache& cache) -> void {
+  const FrameProjectionCache& cache) {
   REX_PROFILE_SCOPE("viewer::draw_frame");
-  set_color(renderer, {247, 244, 234, 255});
+  set_color(renderer, {244, 241, 232, 255});
   SDL_RenderClear(renderer);
+  SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
 
-  const ScreenPoint origin = project_point(state.camera, viewport, {0.0, 0.0, 0.0});
-  set_color(renderer, {224, 216, 194, 255});
-  SDL_RenderDrawLine(renderer, 0, static_cast<int>(std::round(origin.y)), static_cast<int>(std::round(viewport.width)), static_cast<int>(std::round(origin.y)));
-  SDL_RenderDrawLine(renderer, static_cast<int>(std::round(origin.x)), 0, static_cast<int>(std::round(origin.x)), static_cast<int>(std::round(viewport.height)));
-
-  for (std::size_t body_index = 0; body_index < frame.bodies.size(); ++body_index) {
-    const SnapshotBody& body = frame.bodies[body_index];
-    const ProjectedBody& projected = cache.bodies[body_index];
-    const auto fill_color = color_for_body(body.id);
-    set_color(renderer, fill_color);
-    if (body.shape == SnapshotShapeKind::kBox) {
-      draw_box(renderer, projected, fill_color);
-    } else {
-      draw_sphere(renderer, projected);
-    }
+  RenderScene scene{};
+  append_scene_geometry(scene, library, replay, frame, state, viewport);
+  for (const RenderTriangle& triangle : scene.triangles) {
+    SDL_RenderGeometry(renderer, nullptr, triangle.vertices.data(), static_cast<int>(triangle.vertices.size()), nullptr, 0);
+  }
+  for (const RenderLine& line : scene.lines) {
+    set_color(renderer, line.color);
+    SDL_RenderDrawLine(
+      renderer,
+      static_cast<int>(std::round(line.start.x)),
+      static_cast<int>(std::round(line.start.y)),
+      static_cast<int>(std::round(line.end.x)),
+      static_cast<int>(std::round(line.end.y)));
   }
 
   if (state.overlay.show_contacts) {
     for (std::size_t contact_index = 0; contact_index < frame.contacts.size(); ++contact_index) {
       const ProjectedContact& projected = cache.contacts[contact_index];
-      SDL_Rect marker{
-        .x = static_cast<int>(std::round(projected.position.x)) - 3,
-        .y = static_cast<int>(std::round(projected.position.y)) - 3,
-        .w = 6,
-        .h = 6,
-      };
-      set_color(renderer, {200, 69, 69, 255});
-      SDL_RenderFillRect(renderer, &marker);
+      if (!projected.visible) {
+        continue;
+      }
+
+      set_color(renderer, {200, 69, 69, 220});
+      draw_filled_circle(
+        renderer,
+        static_cast<int>(std::round(projected.position.x)),
+        static_cast<int>(std::round(projected.position.y)),
+        4);
 
       if (state.overlay.show_normals) {
         SDL_RenderDrawLine(
@@ -408,10 +773,10 @@ auto draw_frame(
   }
 
   if (state.selection.body_index.has_value() && *state.selection.body_index < frame.bodies.size()) {
-    const ProjectedBody& projected = cache.bodies[*state.selection.body_index];
     const SnapshotBody& body = frame.bodies[*state.selection.body_index];
+    const ProjectedBody& projected = cache.bodies[*state.selection.body_index];
     set_color(renderer, {33, 90, 166, 255});
-    if (body.shape == SnapshotShapeKind::kBox) {
+    if (body.shape == SnapshotShapeKind::kBox && !projected.outline.empty()) {
       draw_polygon_outline(renderer, projected.outline, kSelectionOutlineThickness);
     } else {
       const int radius = std::max(static_cast<int>(std::round(projected.radius_pixels)), 2);
@@ -426,24 +791,88 @@ auto draw_frame(
   }
 
   if (state.selection.contact_index.has_value() && *state.selection.contact_index < frame.contacts.size()) {
-    const ScreenPoint point = cache.contacts[*state.selection.contact_index].position;
+    const ProjectedContact& contact = cache.contacts[*state.selection.contact_index];
     set_color(renderer, {219, 122, 28, 255});
     SDL_RenderDrawLine(
       renderer,
-      static_cast<int>(std::round(point.x)) - 8,
-      static_cast<int>(std::round(point.y)),
-      static_cast<int>(std::round(point.x)) + 8,
-      static_cast<int>(std::round(point.y)));
+      static_cast<int>(std::round(contact.position.x)) - 8,
+      static_cast<int>(std::round(contact.position.y)),
+      static_cast<int>(std::round(contact.position.x)) + 8,
+      static_cast<int>(std::round(contact.position.y)));
     SDL_RenderDrawLine(
       renderer,
-      static_cast<int>(std::round(point.x)),
-      static_cast<int>(std::round(point.y)) - 8,
-      static_cast<int>(std::round(point.x)),
-      static_cast<int>(std::round(point.y)) + 8);
+      static_cast<int>(std::round(contact.position.x)),
+      static_cast<int>(std::round(contact.position.y)) - 8,
+      static_cast<int>(std::round(contact.position.x)),
+      static_cast<int>(std::round(contact.position.y)) + 8);
   }
 
   draw_timeline(renderer, replay, state, viewport);
   SDL_RenderPresent(renderer);
+}
+
+auto handle_key(
+  ViewerState& state,
+  const ReplayLog& replay,
+  const SDL_KeyboardEvent& key,
+  const FrameViewport& viewport,
+  bool& should_quit) -> void {
+  if (key.repeat != 0) {
+    return;
+  }
+
+  switch (key.keysym.sym) {
+    case SDLK_ESCAPE:
+      should_quit = true;
+      return;
+    case SDLK_SPACE:
+      apply_command(state, replay, ViewerCommand::kTogglePlayPause, viewport);
+      return;
+    case SDLK_RIGHT:
+      apply_command(state, replay, ViewerCommand::kStepForward, viewport);
+      return;
+    case SDLK_LEFT:
+      apply_command(state, replay, ViewerCommand::kStepBackward, viewport);
+      return;
+    case SDLK_c:
+      apply_command(state, replay, ViewerCommand::kToggleContacts, viewport);
+      return;
+    case SDLK_n:
+      apply_command(state, replay, ViewerCommand::kToggleNormals, viewport);
+      return;
+    case SDLK_g:
+      apply_command(state, replay, ViewerCommand::kToggleGrid, viewport);
+      return;
+    case SDLK_t:
+      apply_command(state, replay, ViewerCommand::kToggleTrails, viewport);
+      return;
+    case SDLK_r:
+      apply_command(state, replay, ViewerCommand::kResetCamera, viewport);
+      return;
+    case SDLK_EQUALS:
+    case SDLK_PLUS:
+    case SDLK_KP_PLUS:
+      apply_command(state, replay, ViewerCommand::kZoomIn, viewport);
+      return;
+    case SDLK_MINUS:
+    case SDLK_KP_MINUS:
+      apply_command(state, replay, ViewerCommand::kZoomOut, viewport);
+      return;
+    case SDLK_a:
+      apply_command(state, replay, ViewerCommand::kPanLeft, viewport);
+      return;
+    case SDLK_d:
+      apply_command(state, replay, ViewerCommand::kPanRight, viewport);
+      return;
+    case SDLK_w:
+      apply_command(state, replay, ViewerCommand::kPanUp, viewport);
+      return;
+    case SDLK_s:
+      apply_command(state, replay, ViewerCommand::kPanDown, viewport);
+      return;
+    default:
+      return;
+  }
 }
 
 }  // namespace
@@ -486,6 +915,7 @@ auto run_windowed_viewer_impl(ReplayLog replay, LiveFramePump frame_pump, Window
     throw std::runtime_error(std::string{"SDL_CreateRenderer failed: "} + SDL_GetError());
   }
 
+  MeshLibrary mesh_library = make_mesh_library();
   ViewerState state = make_viewer_state(replay);
   if (frame_pump) {
     state.playback = PlaybackMode::kPlaying;
@@ -494,7 +924,8 @@ auto run_windowed_viewer_impl(ReplayLog replay, LiveFramePump frame_pump, Window
   fit_camera_to_frame(state, replay.frames()[state.current_frame], viewport);
 
   bool should_quit = false;
-  bool timeline_dragging = false;
+  PointerDragState drag{};
+  bool screenshot_captured = false;
   std::size_t rendered_frames = 0;
   std::uint32_t last_ticks = SDL_GetTicks();
   double live_accumulated_time = 0.0;
@@ -507,9 +938,8 @@ auto run_windowed_viewer_impl(ReplayLog replay, LiveFramePump frame_pump, Window
     rex::platform::ScopedMilliseconds frame_timer(frame_profile.frame_ms);
     SDL_Event event{};
     const bool should_block_for_events =
-      !timeline_dragging &&
+      drag.mode == DragMode::kNone &&
       state.playback != PlaybackMode::kPlaying;
-    std::optional<ScreenPoint> pending_selection{};
     {
       REX_PROFILE_SCOPE("viewer::events");
       rex::platform::ScopedMilliseconds event_timer(frame_profile.event_ms);
@@ -526,32 +956,69 @@ auto run_windowed_viewer_impl(ReplayLog replay, LiveFramePump frame_pump, Window
             handle_key(state, replay, event.key, viewport, should_quit);
             break;
 
-          case SDL_MOUSEBUTTONDOWN:
+          case SDL_MOUSEWHEEL: {
+            const double factor = std::pow(1.12, static_cast<double>(event.wheel.y));
+            dolly_camera(state.camera, factor);
+            break;
+          }
+
+          case SDL_MOUSEBUTTONDOWN: {
+            const ScreenPoint point{
+              .x = static_cast<double>(event.button.x),
+              .y = static_cast<double>(event.button.y),
+            };
+            drag.anchor = point;
+            drag.last = point;
             if (event.button.button == SDL_BUTTON_LEFT) {
-              const ScreenPoint point{
-                .x = static_cast<double>(event.button.x),
-                .y = static_cast<double>(event.button.y),
-              };
               if (point_in_timeline(timeline_rect(viewport), point)) {
-                timeline_dragging = true;
+                drag.mode = DragMode::kTimeline;
                 scrub_to_timeline(state, replay, viewport, point.x);
               } else {
-                pending_selection = point;
+                drag.mode = DragMode::kOrbit;
+                drag.click_candidate = true;
               }
+            } else if (event.button.button == SDL_BUTTON_RIGHT || event.button.button == SDL_BUTTON_MIDDLE) {
+              drag.mode = DragMode::kPan;
             }
             break;
+          }
 
-          case SDL_MOUSEBUTTONUP:
-            if (event.button.button == SDL_BUTTON_LEFT) {
-              timeline_dragging = false;
+          case SDL_MOUSEBUTTONUP: {
+            const ScreenPoint point{
+              .x = static_cast<double>(event.button.x),
+              .y = static_cast<double>(event.button.y),
+            };
+            if (event.button.button == SDL_BUTTON_LEFT &&
+                drag.mode == DragMode::kOrbit &&
+                drag.click_candidate &&
+                distance_squared(drag.anchor, point) <= (kClickThresholdPixels * kClickThresholdPixels)) {
+              select_at_point(state, replay.frames()[state.current_frame], viewport, point);
             }
+            drag = {};
             break;
+          }
 
-          case SDL_MOUSEMOTION:
-            if (timeline_dragging) {
-              scrub_to_timeline(state, replay, viewport, static_cast<double>(event.motion.x));
+          case SDL_MOUSEMOTION: {
+            const ScreenPoint point{
+              .x = static_cast<double>(event.motion.x),
+              .y = static_cast<double>(event.motion.y),
+            };
+            const double dx = point.x - drag.last.x;
+            const double dy = point.y - drag.last.y;
+            drag.last = point;
+            if (drag.mode == DragMode::kTimeline) {
+              scrub_to_timeline(state, replay, viewport, point.x);
+            } else if (drag.mode == DragMode::kOrbit) {
+              if (distance_squared(drag.anchor, point) > (kClickThresholdPixels * kClickThresholdPixels)) {
+                drag.click_candidate = false;
+              }
+              orbit_camera(state.camera, -dx * kOrbitRadiansPerPixel, dy * kOrbitRadiansPerPixel);
+            } else if (drag.mode == DragMode::kPan) {
+              const double pan_scale = std::max(state.camera.distance * kPanWorldUnitsPerPixel, 0.002);
+              pan_camera(state.camera, -dx * pan_scale, dy * pan_scale);
             }
             break;
+          }
 
           case SDL_WINDOWEVENT:
             if (event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
@@ -593,13 +1060,17 @@ auto run_windowed_viewer_impl(ReplayLog replay, LiveFramePump frame_pump, Window
       rex::platform::ScopedMilliseconds cache_timer(frame_profile.cache_build_ms);
       cache = build_frame_projection_cache(frame, state.camera, viewport);
     }
-    if (pending_selection.has_value()) {
-      select_at_point(state, frame, cache, *pending_selection);
-    }
     {
       REX_PROFILE_SCOPE("viewer::draw");
       rex::platform::ScopedMilliseconds draw_timer(frame_profile.draw_ms);
-      draw_frame(renderer, replay, frame, state, viewport, cache);
+      draw_frame(renderer, mesh_library, replay, frame, state, viewport, cache);
+    }
+    if (!screenshot_captured && !options.screenshot_path.empty()) {
+      save_screenshot(renderer, viewport, options.screenshot_path);
+      screenshot_captured = true;
+      if (options.max_frames == 0) {
+        should_quit = true;
+      }
     }
     update_averages(frame_profile, averages);
     const std::string next_title = make_title(frame, state, replay, averages, static_cast<bool>(frame_pump));
